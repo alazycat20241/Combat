@@ -158,9 +158,9 @@ public sealed class PlayerController : MonoBehaviour
     [Tooltip("可选：拖入大招 Button Action。留空时自动读取空格键")]
     [SerializeField] private InputActionReference ultimateInputReference;
 
-    [Header("必中大招规则")]
+    [Header("大招连击规则")]
     [Min(1)]
-    [Tooltip("任意左右普攻累计命中多少次后，空格可以发动必中大招")]
+    [Tooltip("任意左右普攻累计命中多少次后，空格可以发动大招")]
     [SerializeField] private int requiredComboHits = 3;
 
     [Min(1)]
@@ -216,6 +216,29 @@ public sealed class PlayerController : MonoBehaviour
         }
     };
 
+    [Header("Animator 根运动采样")]
+    [Tooltip("是否用 Animator.rootPosition 采样大招每一帧的位移")]
+    [SerializeField] private bool useAnimatorRootMotion = true;
+
+    [Tooltip("攻击状态所在的 Animator Layer。当前工程中攻击状态在 Override Layer，索引为 1")]
+    [SerializeField, Min(0)] private int attackAnimationLayer = 1;
+
+    [Tooltip("第三击和大招命中的击退距离相对大招根运动距离的倍数")]
+    [SerializeField, Min(0f)] private float ultimateKnockbackDistanceScale = 1f;
+
+    [Header("大招落地判定")]
+    [Tooltip("无法从 rootPosition 找到落地时，退回到动画的哪个进度触发命中")]
+    [SerializeField, Range(0f, 1f)] private float ultimateHitNormalizedTime = 0.9f;
+
+    [Tooltip("根位置 Y 回到起跳高度的这个误差范围内时，视为落地")]
+    [SerializeField, Min(0f)] private float ultimateLandingHeightTolerance = 0.03f;
+
+    [Tooltip("可选的落地检测骨骼。留空时自动使用 Humanoid 的 Hips 骨骼")]
+    [SerializeField] private Transform ultimateLandingProbe;
+
+    [Tooltip("大招判定持续几个逻辑帧。默认 1 帧，只结算一次")]
+    [SerializeField, Min(1)] private int ultimateHitWindowFrames = 1;
+
     // 当前所有启用的玩家。用静态列表代替每次攻击都 FindObjectsOfType，避免检测时分配内存。
     private static readonly List<PlayerController> ActivePlayers = new List<PlayerController>();
     private readonly List<PlayerController> targetBuffer = new List<PlayerController>(2);
@@ -250,6 +273,19 @@ public sealed class PlayerController : MonoBehaviour
     private int comboCounterWindowRemaining;
     private bool ultimateInputBuffered;
 
+    // Animator 采样得到的局部位移，每一项对应一个大招逻辑帧。
+    private Vector3[] ultimateRootMotionPerFrame;
+    [SerializeField] private int ultimateRootMotionFrameCount;
+    [SerializeField] private int ultimateRootMotionLastHorizontalFrame;
+    [SerializeField] private int ultimateLandingFrame;
+    [SerializeField] private int ultimateResolvedHitFrame;
+    [SerializeField] private float ultimateRootMotionDistance;
+
+    private Vector3 ultimateStartLogicalPosition;
+    private Vector3 ultimateFurthestLogicalPosition;
+    private float ultimateFurthestDistanceSqr;
+    private int ultimateVisualSyncEndFrame = -1;
+
     private bool initialized;
 
     public float HP => currentHP;
@@ -260,6 +296,7 @@ public sealed class PlayerController : MonoBehaviour
     public int CurrentAttackFrame => attackFrame;
     public int ComboHitCount => comboHitCount;
     public bool UltimateReady => comboHitCount >= requiredComboHits;
+    public float UltimateRootMotionDistance => ultimateRootMotionDistance;
     public Vector3 LogicalPosition => logicalPosition;
     public bool AcceptPlayerInput
     {
@@ -278,6 +315,11 @@ public sealed class PlayerController : MonoBehaviour
         if (animator != null)
         {
             animator.applyRootMotion = false;
+
+            if (ultimateLandingProbe == null)
+            {
+                ultimateLandingProbe = animator.GetBoneTransform(HumanBodyBones.Hips);
+            }
         }
 
         if (cameraTransform == null && Camera.main != null)
@@ -289,6 +331,9 @@ public sealed class PlayerController : MonoBehaviour
         {
             attackDefinitions = CreateDefaultAttackDefinitions();
         }
+
+        // 在正式战斗开始前采样一次大招根运动，避免第一次放招时才卡顿。
+        SampleUltimateRootMotion();
 
         logicalPosition = transform.position;
         logicalRotation = transform.rotation;
@@ -379,6 +424,18 @@ public sealed class PlayerController : MonoBehaviour
         SmoothVisualTransform();
     }
 
+    private void LateUpdate()
+    {
+        if (!initialized || Time.frameCount > ultimateVisualSyncEndFrame)
+        {
+            return;
+        }
+
+        // Animator 在 Update 之后还可能完成最后一次状态切换。
+        // 大招结束后多保持两个 LateUpdate 帧，确保视觉 Transform 不会回跳。
+        transform.SetPositionAndRotation(logicalPosition, logicalRotation);
+    }
+
     /// <summary>
     /// FixedUpdate 是唯一推进战斗逻辑的地方。
     /// 项目应把 Edit > Project Settings > Time > Fixed Timestep 设置为 0.05 秒，
@@ -418,7 +475,7 @@ public sealed class PlayerController : MonoBehaviour
     /// <summary>
     /// 新规则：
     /// 左右键都只是普通攻击，也都能参与同一套三段连击计数。
-    /// 任意三次有效命中后进入 UltimateReady，按空格发动 JumpAttack 必中大招。
+    /// 任意三次有效命中后进入 UltimateReady，按空格发动 JumpAttack 大招。
     /// 普攻中可以提前按空格，等当前攻击进入后摇时自动衔接大招。
     /// </summary>
     private void HandleAttackInput(
@@ -490,6 +547,50 @@ public sealed class PlayerController : MonoBehaviour
         int activeStart = Mathf.Max(1, definition.activeStartFrame);
         int activeEnd = Mathf.Max(activeStart, definition.activeEndFrame);
         int recoveryEnd = activeEnd + Mathf.Max(0, definition.recoveryFrames);
+        if (definition.attackState == AttackState.JumpAttack)
+        {
+            int animationFrameCount = ultimateRootMotionPerFrame != null
+                ? ultimateRootMotionPerFrame.Length
+                : Mathf.Max(recoveryEnd, activeEnd);
+
+            // 优先使用 rootPosition/Hips 检测到的真实落地帧。
+            int normalizedHitFrame = Mathf.Clamp(
+                Mathf.CeilToInt(animationFrameCount * ultimateHitNormalizedTime),
+                1,
+                animationFrameCount);
+
+            int landingHitFrame = Mathf.Clamp(
+                ultimateLandingFrame,
+                1,
+                animationFrameCount);
+
+            int horizontalEndHitFrame = Mathf.Clamp(
+                ultimateRootMotionLastHorizontalFrame + 1,
+                1,
+                animationFrameCount);
+
+            if (ultimateLandingFrame > 0)
+            {
+                activeStart = landingHitFrame;
+            }
+            else if (ultimateRootMotionLastHorizontalFrame > 0)
+            {
+                // Hips/root 都没有垂直数据时，以水平冲刺结束后的下一帧作为落地代理。
+                activeStart = horizontalEndHitFrame;
+            }
+            else
+            {
+                activeStart = normalizedHitFrame;
+            }
+
+            ultimateResolvedHitFrame = activeStart;
+            activeEnd = Mathf.Min(
+                animationFrameCount,
+                activeStart + ultimateHitWindowFrames - 1);
+
+            // 按完整动画长度结束，确保最后一个根运动采样也写入 logicalPosition。
+            recoveryEnd = Mathf.Max(recoveryEnd, animationFrameCount, activeEnd);
+        }
 
         // 攻击帧从 1 开始更容易和“第 5 到第 10 帧”对应。
         attackFrame++;
@@ -549,6 +650,10 @@ public sealed class PlayerController : MonoBehaviour
             // 大招已经消费完本次连击，立刻清空计数，避免一次普攻后重复放大招。
             comboHitCount = 0;
             comboCounterWindowRemaining = 0;
+            FaceTargetForUltimate();
+            ultimateStartLogicalPosition = logicalPosition;
+            ultimateFurthestLogicalPosition = logicalPosition;
+            ultimateFurthestDistanceSqr = 0f;
         }
 
         attackState = nextState;
@@ -563,6 +668,261 @@ public sealed class PlayerController : MonoBehaviour
     }
 
     /// <summary>
+    /// 大招启动时把逻辑朝向转向最近的活目标。
+    /// 根运动采样只记录动画自身的局部位移，实际施放时再用这个朝向旋转，
+    /// 因此角色会朝敌人冲过去；最终命中仍然使用普通 AABB，打不到就不会扣血。
+    /// </summary>
+    private void FaceTargetForUltimate()
+    {
+        CollectTargets(targetBuffer);
+
+        PlayerController nearestTarget = null;
+        float nearestDistanceSqr = float.PositiveInfinity;
+
+        for (int i = 0; i < targetBuffer.Count; i++)
+        {
+            PlayerController target = targetBuffer[i];
+            if (target == null || target == this || target.isDead)
+            {
+                continue;
+            }
+
+            Vector3 toTarget = target.logicalPosition - logicalPosition;
+            toTarget.y = 0f;
+            float distanceSqr = toTarget.sqrMagnitude;
+            if (distanceSqr > EPSILON && distanceSqr < nearestDistanceSqr)
+            {
+                nearestTarget = target;
+                nearestDistanceSqr = distanceSqr;
+            }
+        }
+
+        if (nearestTarget == null)
+        {
+            return;
+        }
+
+        Vector3 direction = nearestTarget.logicalPosition - logicalPosition;
+        direction.y = 0f;
+        if (direction.sqrMagnitude <= EPSILON)
+        {
+            return;
+        }
+
+        logicalRotation = Quaternion.LookRotation(direction.normalized, Vector3.up);
+        transform.rotation = logicalRotation;
+    }
+
+    /// <summary>
+    /// 启动前模拟播放 JumpAttack，并按逻辑帧读取 Animator.rootPosition。
+    ///
+    /// 采样方法：
+    /// 1. 强制进入 JumpAttack 状态并把动画时间设为 0。
+    /// 2. 每调用一次 Animator.Update(fixedDeltaTime)，读取一次 rootPosition。
+    /// 3. 相邻两帧的 rootPosition 差值转换到角色初始朝向的局部空间。
+    /// 4. 缓存每一帧的位移，真正放招时由 FixedUpdate 逐帧消费。
+    ///
+    /// 采样结束会恢复 Animator 和 Transform，避免预演动画在画面上闪一下。
+    /// </summary>
+    private void SampleUltimateRootMotion()
+    {
+        ultimateRootMotionPerFrame = null;
+        ultimateRootMotionFrameCount = 0;
+        ultimateRootMotionLastHorizontalFrame = 0;
+        ultimateLandingFrame = 0;
+        ultimateResolvedHitFrame = 0;
+        ultimateRootMotionDistance = 0f;
+
+        if (!useAnimatorRootMotion || animator == null || animator.layerCount <= 0)
+        {
+            return;
+        }
+
+        int layer = Mathf.Clamp(attackAnimationLayer, 0, animator.layerCount - 1);
+        int stateHash = Animator.StringToHash(AttackState.JumpAttack.ToString());
+
+        Vector3 savedPosition = animator.transform.position;
+        Quaternion savedRotation = animator.transform.rotation;
+        bool savedApplyRootMotion = animator.applyRootMotion;
+        AnimatorCullingMode savedCullingMode = animator.cullingMode;
+
+        try
+        {
+            animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+            animator.applyRootMotion = true;
+            animator.Rebind();
+            animator.Play(stateHash, layer, 0f);
+            animator.Update(0f);
+
+            AnimatorStateInfo stateInfo = animator.GetCurrentAnimatorStateInfo(layer);
+            int frameCount = Mathf.Max(
+                1,
+                Mathf.CeilToInt(stateInfo.length / Time.fixedDeltaTime));
+
+            Vector3 previousRootPosition = animator.rootPosition;
+            float startRootHeight = previousRootPosition.y;
+            Transform landingProbe = ultimateLandingProbe;
+            if (landingProbe == null)
+            {
+                landingProbe = animator.GetBoneTransform(HumanBodyBones.Hips);
+            }
+
+            float previousProbeHeight = landingProbe != null
+                ? landingProbe.position.y
+                : startRootHeight;
+            float startProbeHeight = previousProbeHeight;
+            Quaternion inverseStartRotation = Quaternion.Inverse(savedRotation);
+            Vector3[] sampledFrames = new Vector3[frameCount];
+            Vector3 cumulativeDisplacement = Vector3.zero;
+            float furthestDistanceSqr = 0f;
+            int furthestFrame = 0;
+            int lastHorizontalFrame = 0;
+            int validFrameCount = 0;
+            bool wasAirborne = false;
+            bool probeWasAirborne = false;
+
+            for (int frameIndex = 0; frameIndex < frameCount; frameIndex++)
+            {
+                animator.Update(Time.fixedDeltaTime);
+
+                AnimatorStateInfo currentState = animator.GetCurrentAnimatorStateInfo(layer);
+                if (currentState.shortNameHash != stateHash ||
+                    animator.IsInTransition(layer))
+                {
+                    // 状态开始切回 Empty/Move 后，rootPosition 会重置。
+                    // 这里必须停止采样，否则重置产生的反向位移会把前面的冲刺全部抵消。
+                    break;
+                }
+
+                Vector3 currentRootPosition = animator.rootPosition;
+                float previousRootHeight = previousRootPosition.y;
+                float currentRootHeight = currentRootPosition.y;
+
+                float airborneThreshold = startRootHeight + ultimateLandingHeightTolerance;
+                if (currentRootHeight > airborneThreshold)
+                {
+                    wasAirborne = true;
+                }
+                else if (wasAirborne &&
+                         previousRootHeight > airborneThreshold &&
+                         currentRootHeight <= airborneThreshold)
+                {
+                    // 起跳后第一次从阈值上方回到阈值下方，就是动画的落地帧。
+                    ultimateLandingFrame = frameIndex + 1;
+                    wasAirborne = false;
+                }
+
+                if (landingProbe != null && ultimateLandingFrame <= 0)
+                {
+                    float currentProbeHeight = landingProbe.position.y;
+                    float probeAirborneThreshold =
+                        startProbeHeight + ultimateLandingHeightTolerance;
+
+                    if (currentProbeHeight > probeAirborneThreshold)
+                    {
+                        probeWasAirborne = true;
+                    }
+                    else if (probeWasAirborne &&
+                             previousProbeHeight > probeAirborneThreshold &&
+                             currentProbeHeight <= probeAirborneThreshold)
+                    {
+                        // rootPosition 不包含垂直运动时，Hips 的高度曲线仍能提供落地时刻。
+                        ultimateLandingFrame = frameIndex + 1;
+                        probeWasAirborne = false;
+                    }
+
+                    previousProbeHeight = currentProbeHeight;
+                }
+
+                Vector3 worldDelta = currentRootPosition - previousRootPosition;
+                Vector3 localDelta = inverseStartRotation * worldDelta;
+                localDelta.y = 0f;
+
+                sampledFrames[frameIndex] = localDelta;
+                cumulativeDisplacement += localDelta;
+                validFrameCount++;
+
+                float currentDistanceSqr = cumulativeDisplacement.sqrMagnitude;
+                if (currentDistanceSqr > furthestDistanceSqr)
+                {
+                    furthestDistanceSqr = currentDistanceSqr;
+                    furthestFrame = validFrameCount;
+                }
+
+                if (localDelta.sqrMagnitude > EPSILON * EPSILON)
+                {
+                    lastHorizontalFrame = frameIndex + 1;
+                }
+
+                previousRootPosition = currentRootPosition;
+
+                if (ultimateLandingFrame > 0)
+                {
+                    // 只保留到落地帧，避免随后的回到 Idle 位移污染最终坐标。
+                    break;
+                }
+            }
+
+            if (validFrameCount > 0)
+            {
+                int usableFrameCount = validFrameCount;
+
+                // 如果没有识别到 Y 轴落地，但动画尾端把角色往起点方向拉回去，
+                // 就截断到离起点最远的一帧，避免最终坐标被反向重置抵消。
+                if (ultimateLandingFrame > 0)
+                {
+                    usableFrameCount = Mathf.Min(ultimateLandingFrame, validFrameCount);
+                }
+                else if (furthestFrame > 0 &&
+                         cumulativeDisplacement.sqrMagnitude <
+                         furthestDistanceSqr * 0.81f)
+                {
+                    usableFrameCount = furthestFrame;
+                }
+
+                if (usableFrameCount < sampledFrames.Length)
+                {
+                    Array.Resize(ref sampledFrames, usableFrameCount);
+                }
+
+                cumulativeDisplacement = Vector3.zero;
+                for (int i = 0; i < sampledFrames.Length; i++)
+                {
+                    cumulativeDisplacement += sampledFrames[i];
+                }
+
+                ultimateRootMotionPerFrame = sampledFrames;
+                ultimateRootMotionFrameCount = sampledFrames.Length;
+                ultimateRootMotionLastHorizontalFrame = lastHorizontalFrame;
+                ultimateRootMotionDistance = cumulativeDisplacement.magnitude;
+                Debug.Log(
+                    $"JumpAttack 根运动采样完成：{sampledFrames.Length} 帧，水平净位移 " +
+                    $"{ultimateRootMotionDistance:F3} 米，落地判定帧 " +
+                    $"{(ultimateLandingFrame > 0 ? ultimateLandingFrame.ToString() : "未检测到")}。",
+                    this);
+            }
+        }
+        finally
+        {
+            if (animator != null)
+            {
+                animator.applyRootMotion = savedApplyRootMotion;
+                animator.cullingMode = savedCullingMode;
+                animator.Rebind();
+                animator.Update(0f);
+                animator.transform.SetPositionAndRotation(savedPosition, savedRotation);
+            }
+        }
+
+        if (ultimateRootMotionPerFrame == null)
+        {
+            Debug.LogWarning(
+                "JumpAttack 没有从 Animator.rootPosition 采样到水平位移，将回退到攻击数据里的前冲距离。",
+                this);
+        }
+    }
+
+    /// <summary>
     /// 攻击前冲完全由逻辑帧驱动。
     /// 前冲距离在配置帧区间内均摊到每一个 FixedUpdate，而不是在触发攻击时一次性瞬移，
     /// 因此总距离可控，也不会受渲染帧率影响。角色朝向在攻击期间不变，所以使用
@@ -570,6 +930,22 @@ public sealed class PlayerController : MonoBehaviour
     /// </summary>
     private void ApplyAttackForwardMovement(CombatAttackDefinition definition)
     {
+        if (definition.attackState == AttackState.JumpAttack &&
+            ultimateRootMotionPerFrame != null &&
+            ultimateRootMotionDistance > EPSILON)
+        {
+            int sampleIndex = attackFrame - 1;
+            if (sampleIndex >= 0 && sampleIndex < ultimateRootMotionPerFrame.Length)
+            {
+                Vector3 sampledLocalDelta = ultimateRootMotionPerFrame[sampleIndex];
+                logicalPosition += logicalRotation * sampledLocalDelta;
+                ClampLogicalPositionToMap();
+                TrackUltimateFurthestPosition();
+            }
+
+            return;
+        }
+
         float totalDistance = Mathf.Max(0f, definition.forwardMoveDistance);
         if (totalDistance <= EPSILON)
         {
@@ -595,16 +971,57 @@ public sealed class PlayerController : MonoBehaviour
 
         logicalPosition += forward.normalized * distanceThisFrame;
         ClampLogicalPositionToMap();
+
+        if (definition.attackState == AttackState.JumpAttack)
+        {
+            TrackUltimateFurthestPosition();
+        }
+    }
+
+    private void TrackUltimateFurthestPosition()
+    {
+        Vector3 displacement = logicalPosition - ultimateStartLogicalPosition;
+        displacement.y = 0f;
+        float distanceSqr = displacement.sqrMagnitude;
+
+        if (distanceSqr > ultimateFurthestDistanceSqr)
+        {
+            ultimateFurthestDistanceSqr = distanceSqr;
+            ultimateFurthestLogicalPosition = logicalPosition;
+        }
     }
 
     private void FinishCurrentAttack()
     {
+        AttackState finishedAttack = attackState;
+
         attackState = AttackState.None;
         attackPhase = AttackPhase.None;
         attackFrame = 0;
         comboBufferedAttack = AttackState.None;
         ultimateInputBuffered = false;
         hitTargetsThisAttack.Clear();
+
+        if (finishedAttack == AttackState.JumpAttack)
+        {
+            if (ultimateFurthestDistanceSqr > EPSILON * EPSILON)
+            {
+                // 最终位置取本次大招离起点最远的有效逻辑位置。
+                // 即使动画尾段把 root/Hips 拉回原点，也不会覆盖已经完成的冲刺。
+                logicalPosition = ultimateFurthestLogicalPosition;
+                ClampLogicalPositionToMap();
+            }
+
+            // 根运动采样已经逐帧叠加到 logicalPosition；结束时立即对齐渲染位置，
+            // 避免大招落地后角色还要额外滑行十几帧才追上逻辑坐标。
+            transform.SetPositionAndRotation(logicalPosition, logicalRotation);
+            ultimateVisualSyncEndFrame = Time.frameCount + 2;
+
+            Debug.Log(
+                $"JumpAttack 结束：起点 {ultimateStartLogicalPosition}，最终逻辑位置 " +
+                $"{logicalPosition}。",
+                this);
+        }
     }
 
     private CombatAttackDefinition GetDefinition(AttackState state)
@@ -626,15 +1043,14 @@ public sealed class PlayerController : MonoBehaviour
     }
 
     /// <summary>
-    /// 普通攻击使用纯数学 AABB；JumpAttack 作为空格大招，在判定帧直接锁定目标，
-    /// 不做距离相交判断，所以只要目标还活着就必定命中。
-    /// 同一段攻击仍然只对同一个目标结算一次。
+    /// 所有攻击都使用纯数学 AABB，JumpAttack 也不例外。
+    /// 大招只有在落地判定帧时刚好打得到目标才算命中。
     /// </summary>
     private void DetectAttackHits(CombatAttackDefinition definition)
     {
         Bounds attackBounds = BuildAttackBounds(definition);
-        bool guaranteedUltimate = definition.attackState == AttackState.JumpAttack;
         bool connectedOrdinaryAttack = false;
+        float appliedKnockbackSpeed = GetComboAwareKnockbackSpeed(definition);
         CollectTargets(targetBuffer);
 
         for (int i = 0; i < targetBuffer.Count; i++)
@@ -651,13 +1067,10 @@ public sealed class PlayerController : MonoBehaviour
                 continue;
             }
 
-            if (!guaranteedUltimate)
+            Bounds hurtBounds = target.BuildHurtBounds();
+            if (!attackBounds.Intersects(hurtBounds))
             {
-                Bounds hurtBounds = target.BuildHurtBounds();
-                if (!attackBounds.Intersects(hurtBounds))
-                {
-                    continue;
-                }
+                continue;
             }
 
             hitTargetsThisAttack.Add(targetId);
@@ -668,9 +1081,11 @@ public sealed class PlayerController : MonoBehaviour
             target.ReceiveHit(
                 logicalPosition,
                 definition.damage,
-                knockbackDirection.normalized * definition.knockbackSpeed);
+                knockbackDirection.normalized * appliedKnockbackSpeed);
 
-            if (!guaranteedUltimate && !target.isDead && target.isHurt)
+            if (definition.attackState != AttackState.JumpAttack &&
+                !target.isDead &&
+                target.isHurt)
             {
                 connectedOrdinaryAttack = true;
             }
@@ -690,6 +1105,29 @@ public sealed class PlayerController : MonoBehaviour
     {
         comboHitCount = Mathf.Min(requiredComboHits, comboHitCount + 1);
         comboCounterWindowRemaining = comboCounterWindowFrames;
+    }
+
+    /// <summary>
+    /// 第三下普攻和大招命中使用 Animator 采样出的大招总位移作为击退基准。
+    /// 现有击退采用“初速度 + 恒定摩擦”，所以用 v² = 2as 反推初速度。
+    /// 实际距离仍可能被硬直时长或地图边界截短，但不会出现第三击只推一点点的感觉。
+    /// </summary>
+    private float GetComboAwareKnockbackSpeed(CombatAttackDefinition definition)
+    {
+        bool isThirdOrdinaryHit =
+            definition.attackState != AttackState.JumpAttack &&
+            comboHitCount == requiredComboHits - 1;
+
+        bool isUltimateHit = definition.attackState == AttackState.JumpAttack;
+        if ((!isThirdOrdinaryHit && !isUltimateHit) ||
+            ultimateRootMotionDistance <= EPSILON ||
+            knockbackFriction <= EPSILON)
+        {
+            return definition.knockbackSpeed;
+        }
+
+        float desiredDistance = ultimateRootMotionDistance * ultimateKnockbackDistanceScale;
+        return Mathf.Sqrt(2f * knockbackFriction * desiredDistance);
     }
 
     private void TickComboCounterWindow()
@@ -1084,6 +1522,11 @@ public sealed class PlayerController : MonoBehaviour
         moveSpeed = Mathf.Max(0f, moveSpeed);
         requiredComboHits = Mathf.Max(1, requiredComboHits);
         comboCounterWindowFrames = Mathf.Max(1, comboCounterWindowFrames);
+        attackAnimationLayer = Mathf.Max(0, attackAnimationLayer);
+        ultimateKnockbackDistanceScale = Mathf.Max(0f, ultimateKnockbackDistanceScale);
+        ultimateHitNormalizedTime = Mathf.Clamp01(ultimateHitNormalizedTime);
+        ultimateLandingHeightTolerance = Mathf.Max(0f, ultimateLandingHeightTolerance);
+        ultimateHitWindowFrames = Mathf.Max(1, ultimateHitWindowFrames);
 
         if (attackDefinitions != null)
         {
