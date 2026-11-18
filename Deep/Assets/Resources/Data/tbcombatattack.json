@@ -1,0 +1,71 @@
+[
+  {
+    "Id": "left_punch",
+    "OwnerId": 1001,
+    "AttackState": 1,
+    "ActiveStartFrame": 5,
+    "ActiveEndFrame": 10,
+    "RecoveryFrames": 7,
+    "Damage": 8,
+    "KnockbackSpeed": 4.5,
+    "ForwardMoveDistance": 0.35,
+    "ForwardMoveStartFrame": 1,
+    "ForwardMoveEndFrame": 4,
+    "AttackBoxSize": {
+      "x": 1.25,
+      "y": 0.9,
+      "z": 1.4
+    },
+    "AttackBoxLocalOffset": {
+      "x": 0,
+      "y": 0.9,
+      "z": 0.8
+    }
+  },
+  {
+    "Id": "right_punch",
+    "OwnerId": 1001,
+    "AttackState": 2,
+    "ActiveStartFrame": 5,
+    "ActiveEndFrame": 10,
+    "RecoveryFrames": 8,
+    "Damage": 10,
+    "KnockbackSpeed": 5.5,
+    "ForwardMoveDistance": 0.45,
+    "ForwardMoveStartFrame": 1,
+    "ForwardMoveEndFrame": 4,
+    "AttackBoxSize": {
+      "x": 1.35,
+      "y": 0.9,
+      "z": 1.45
+    },
+    "AttackBoxLocalOffset": {
+      "x": 0,
+      "y": 0.9,
+      "z": 0.85
+    }
+  },
+  {
+    "Id": "jump_attack",
+    "OwnerId": 1001,
+    "AttackState": 3,
+    "ActiveStartFrame": 5,
+    "ActiveEndFrame": 10,
+    "RecoveryFrames": 10,
+    "Damage": 18,
+    "KnockbackSpeed": 8,
+    "ForwardMoveDistance": 0.8,
+    "ForwardMoveStartFrame": 1,
+    "ForwardMoveEndFrame": 5,
+    "AttackBoxSize": {
+      "x": 1.7,
+      "y": 1.2,
+      "z": 1.8
+    },
+    "AttackBoxLocalOffset": {
+      "x": 0,
+      "y": 1.05,
+      "z": 0.95
+    }
+  }
+]
