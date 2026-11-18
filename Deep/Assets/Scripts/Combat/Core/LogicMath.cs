@@ -3,48 +3,46 @@ using System;
 namespace Combat.Core
 {
     /// <summary>
-    /// 纯逻辑三维向量。禁止依赖 UnityEngine.Vector3，未来可直接替换成 Fix64 版本。
+    /// 纯逻辑三维向量，所有分量和运算均为 Fix64。
     /// </summary>
     [Serializable]
     public struct LogicVector3 : IEquatable<LogicVector3>
     {
-        public float X;
-        public float Y;
-        public float Z;
+        public Fix64 X;
+        public Fix64 Y;
+        public Fix64 Z;
 
-        public LogicVector3(float x, float y, float z)
+        public LogicVector3(Fix64 x, Fix64 y, Fix64 z)
         {
             X = x;
             Y = y;
             Z = z;
         }
 
-        public static LogicVector3 Zero => new LogicVector3(0f, 0f, 0f);
-        public static LogicVector3 Up => new LogicVector3(0f, 1f, 0f);
-        public static LogicVector3 Forward => new LogicVector3(0f, 0f, 1f);
+        public static LogicVector3 Zero => new LogicVector3(0, 0, 0);
+        public static LogicVector3 Up => new LogicVector3(0, 1, 0);
+        public static LogicVector3 Forward => new LogicVector3(0, 0, 1);
 
-        public float SqrMagnitude => (X * X) + (Y * Y) + (Z * Z);
-        public float Magnitude => (float)Math.Sqrt(SqrMagnitude);
+        public Fix64 SqrMagnitude => (X * X) + (Y * Y) + (Z * Z);
+        public Fix64 Magnitude => Fix64.Sqrt(SqrMagnitude);
 
         public LogicVector3 FlattenY()
         {
-            return new LogicVector3(X, 0f, Z);
+            return new LogicVector3(X, Fix64.Zero, Z);
         }
 
         public LogicVector3 Normalized()
         {
-            float magnitude = Magnitude;
-            return magnitude > 0.000001f
-                ? this * (1f / magnitude)
-                : Zero;
+            Fix64 magnitude = Magnitude;
+            return magnitude > Fix64.Zero ? this / magnitude : Zero;
         }
 
-        public static float Dot(LogicVector3 a, LogicVector3 b)
+        public static Fix64 Dot(LogicVector3 a, LogicVector3 b)
         {
             return (a.X * b.X) + (a.Y * b.Y) + (a.Z * b.Z);
         }
 
-        public static float Distance(LogicVector3 a, LogicVector3 b)
+        public static Fix64 Distance(LogicVector3 a, LogicVector3 b)
         {
             return (a - b).Magnitude;
         }
@@ -64,19 +62,30 @@ namespace Combat.Core
             return new LogicVector3(-value.X, -value.Y, -value.Z);
         }
 
-        public static LogicVector3 operator *(LogicVector3 value, float scalar)
+        public static LogicVector3 operator *(LogicVector3 value, Fix64 scalar)
         {
-            return new LogicVector3(value.X * scalar, value.Y * scalar, value.Z * scalar);
+            return new LogicVector3(
+                value.X * scalar,
+                value.Y * scalar,
+                value.Z * scalar);
         }
 
-        public static LogicVector3 operator *(float scalar, LogicVector3 value)
+        public static LogicVector3 operator *(Fix64 scalar, LogicVector3 value)
         {
             return value * scalar;
         }
 
+        public static LogicVector3 operator /(LogicVector3 value, Fix64 scalar)
+        {
+            return new LogicVector3(
+                value.X / scalar,
+                value.Y / scalar,
+                value.Z / scalar);
+        }
+
         public bool Equals(LogicVector3 other)
         {
-            return X.Equals(other.X) && Y.Equals(other.Y) && Z.Equals(other.Z);
+            return X == other.X && Y == other.Y && Z == other.Z;
         }
 
         public override bool Equals(object obj)
@@ -97,41 +106,40 @@ namespace Combat.Core
 
         public override string ToString()
         {
-            return $"({X:F2}, {Y:F2}, {Z:F2})";
+            return $"({X}, {Y}, {Z})";
         }
     }
 
     /// <summary>
-    /// 只用 Y 轴朝向的逻辑旋转。当前动作游戏逻辑不需要俯仰和翻滚，因此避免引入完整四元数。
-    /// 未来替换 Fix64 时，只需要替换角度计算。
+    /// 只用 Y 轴朝向的逻辑旋转，角度和三角函数均为定点实现。
     /// </summary>
     [Serializable]
     public struct LogicRotation
     {
-        public float YawRadians;
+        public Fix64 YawRadians;
 
-        public LogicRotation(float yawRadians)
+        public LogicRotation(Fix64 yawRadians)
         {
             YawRadians = yawRadians;
         }
 
-        public static LogicRotation Identity => new LogicRotation(0f);
+        public static LogicRotation Identity => new LogicRotation(Fix64.Zero);
 
         public LogicVector3 Forward
         {
             get
             {
                 return new LogicVector3(
-                    (float)Math.Sin(YawRadians),
-                    0f,
-                    (float)Math.Cos(YawRadians));
+                    FixMath.Sin(YawRadians),
+                    Fix64.Zero,
+                    FixMath.Cos(YawRadians));
             }
         }
 
         public LogicVector3 Rotate(LogicVector3 localDirection)
         {
-            float sin = (float)Math.Sin(YawRadians);
-            float cos = (float)Math.Cos(YawRadians);
+            Fix64 sin = FixMath.Sin(YawRadians);
+            Fix64 cos = FixMath.Cos(YawRadians);
 
             return new LogicVector3(
                 (localDirection.X * cos) + (localDirection.Z * sin),
@@ -141,40 +149,32 @@ namespace Combat.Core
 
         public static LogicRotation LookTowards(LogicVector3 direction)
         {
-            direction.Y = 0f;
-            if (direction.SqrMagnitude <= 0.000001f)
+            direction.Y = Fix64.Zero;
+            if (direction.SqrMagnitude <= Fix64.Zero)
             {
                 return Identity;
             }
 
-            return new LogicRotation((float)Math.Atan2(direction.X, direction.Z));
+            return new LogicRotation(
+                FixMath.Atan2(direction.X, direction.Z));
         }
 
+        /// <summary>
+        /// 确定性线性转向插值。sharpness * deltaTime 被截断到 [0,1]。
+        /// </summary>
         public static LogicRotation SmoothTowards(
             LogicRotation current,
             LogicRotation target,
-            float sharpness,
-            float deltaTime)
+            Fix64 sharpness,
+            Fix64 deltaTime)
         {
-            float t = 1f - (float)Math.Exp(-Math.Max(0f, sharpness) * deltaTime);
-            float delta = NormalizeAngle(target.YawRadians - current.YawRadians);
+            Fix64 t = Fix64.Clamp(
+                sharpness * deltaTime,
+                Fix64.Zero,
+                Fix64.One);
+            Fix64 delta = FixMath.NormalizeAngle(
+                target.YawRadians - current.YawRadians);
             return new LogicRotation(current.YawRadians + (delta * t));
-        }
-
-        private static float NormalizeAngle(float angle)
-        {
-            const float twoPi = (float)(Math.PI * 2.0);
-            while (angle > Math.PI)
-            {
-                angle -= twoPi;
-            }
-
-            while (angle < -Math.PI)
-            {
-                angle += twoPi;
-            }
-
-            return angle;
         }
     }
 
@@ -195,12 +195,177 @@ namespace Combat.Core
 
         public bool Intersects(LogicAabb other)
         {
-            LogicVector3 halfA = Size * 0.5f;
-            LogicVector3 halfB = other.Size * 0.5f;
+            LogicVector3 halfA = Size * Fix64.Half;
+            LogicVector3 halfB = other.Size * Fix64.Half;
 
-            return Math.Abs(Center.X - other.Center.X) <= halfA.X + halfB.X &&
-                   Math.Abs(Center.Y - other.Center.Y) <= halfA.Y + halfB.Y &&
-                   Math.Abs(Center.Z - other.Center.Z) <= halfA.Z + halfB.Z;
+            return Fix64.Abs(Center.X - other.Center.X) <= halfA.X + halfB.X &&
+                   Fix64.Abs(Center.Y - other.Center.Y) <= halfA.Y + halfB.Y &&
+                   Fix64.Abs(Center.Z - other.Center.Z) <= halfA.Z + halfB.Z;
+        }
+    }
+
+    /// <summary>
+    /// 固定精度的确定性三角函数。
+    /// </summary>
+    public static class FixMath
+    {
+        public static readonly Fix64 Pi =
+            Fix64.Parse("3.1415926535897932");
+        public static readonly Fix64 TwoPi =
+            Fix64.Parse("6.2831853071795864");
+        public static readonly Fix64 HalfPi =
+            Fix64.Parse("1.5707963267948966");
+
+        public static Fix64 NormalizeAngle(Fix64 angle)
+        {
+            while (angle > Pi)
+            {
+                angle -= TwoPi;
+            }
+
+            while (angle < -Pi)
+            {
+                angle += TwoPi;
+            }
+
+            return angle;
+        }
+
+        public static Fix64 Sin(Fix64 angle)
+        {
+            Fix64 x = NormalizeAngle(angle);
+            if (x == Fix64.Zero)
+            {
+                return Fix64.Zero;
+            }
+
+            if (x == HalfPi)
+            {
+                return Fix64.One;
+            }
+
+            if (x == -HalfPi)
+            {
+                return -Fix64.One;
+            }
+
+            // 将输入折叠到 [-π/2, π/2]，减少高次项误差。
+            if (x > HalfPi)
+            {
+                x = Pi - x;
+            }
+            else if (x < -HalfPi)
+            {
+                x = -Pi - x;
+            }
+
+            Fix64 x2 = x * x;
+            Fix64 term = x;
+            Fix64 result = x;
+
+            term = (-term * x2) / Fix64.FromInt(6);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(20);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(42);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(72);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(110);
+            result += term;
+            return result;
+        }
+
+        public static Fix64 Cos(Fix64 angle)
+        {
+            Fix64 x = NormalizeAngle(angle);
+            if (x == Fix64.Zero)
+            {
+                return Fix64.One;
+            }
+
+            if (x == HalfPi || x == -HalfPi)
+            {
+                return Fix64.Zero;
+            }
+
+            bool negative = false;
+            if (x > HalfPi)
+            {
+                x = Pi - x;
+                negative = true;
+            }
+            else if (x < -HalfPi)
+            {
+                x = -Pi - x;
+                negative = true;
+            }
+
+            Fix64 x2 = x * x;
+            Fix64 term = Fix64.One;
+            Fix64 result = Fix64.One;
+
+            term = (-term * x2) / Fix64.FromInt(2);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(12);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(30);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(56);
+            result += term;
+            term = (-term * x2) / Fix64.FromInt(90);
+            result += term;
+
+            return negative ? -result : result;
+        }
+
+        public static Fix64 Atan2(Fix64 y, Fix64 x)
+        {
+            if (x == Fix64.Zero && y == Fix64.Zero)
+            {
+                return Fix64.Zero;
+            }
+
+            Fix64 absX = Fix64.Abs(x);
+            Fix64 absY = Fix64.Abs(y);
+            Fix64 angle;
+
+            if (absX >= absY)
+            {
+                Fix64 ratio = absY / absX;
+                angle = AtanUnit(ratio);
+                if (x < Fix64.Zero)
+                {
+                    angle = Pi - angle;
+                }
+            }
+            else
+            {
+                Fix64 ratio = absX / absY;
+                angle = HalfPi - AtanUnit(ratio);
+                if (x < Fix64.Zero)
+                {
+                    angle = Pi - angle;
+                }
+            }
+
+            return y < Fix64.Zero ? -angle : angle;
+        }
+
+        private static Fix64 AtanUnit(Fix64 value)
+        {
+            Fix64 x = Fix64.Clamp(value, Fix64.Zero, Fix64.One);
+            Fix64 x2 = x * x;
+            Fix64 result =
+                Fix64.Parse("0.9998660") +
+                (x2 * (
+                    Fix64.Parse("-0.3302995") +
+                    (x2 * (
+                        Fix64.Parse("0.1801410") +
+                        (x2 * (
+                            Fix64.Parse("-0.0851330") +
+                            (x2 * Fix64.Parse("0.0208351"))))))));
+            return x * result;
         }
     }
 }

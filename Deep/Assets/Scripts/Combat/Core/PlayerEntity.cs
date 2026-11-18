@@ -7,32 +7,30 @@ namespace Combat.Core
     /// 纯 C# 战斗实体。
     ///
     /// 这个类不引用 UnityEngine，不处理 Animator、输入设备、Transform 平滑或渲染。
-    /// 客户端 PlayerController 与服务端都调用同一套 Tick/FixedUpdateLogic。
+    /// 客户端与服务端都通过 CombatWorld.Step() 调用同一套逻辑。
     /// </summary>
     public sealed class PlayerEntity
     {
-        private const float Epsilon = 0.0001f;
+        private static readonly Fix64 Epsilon = Fix64.Parse("0.0001");
 
         private readonly PlayerCombatConfig config;
-        private readonly Dictionary<AttackState, AttackMotionProfile> attackMotionProfiles =
-            new Dictionary<AttackState, AttackMotionProfile>();
 
         private readonly HashSet<int> hitTargetsThisAttack = new HashSet<int>();
         private readonly List<PlayerEntity> targetBuffer = new List<PlayerEntity>(4);
+        private readonly List<CombatEvent> pendingEvents = new List<CombatEvent>(4);
 
         private AttackState bufferedAttack = AttackState.None;
         private bool ultimateInputBuffered;
         private int comboHitCount;
         private int comboCounterWindowRemaining;
 
-        private float hurtTimer;
+        private Fix64 hurtTimer;
         private LogicVector3 knockbackVelocity;
 
         private LogicVector3 ultimateStartPosition;
         private LogicVector3 ultimateFurthestPosition;
-        private float ultimateFurthestDistanceSqr;
-
-        public event Action<CombatEvent> CombatEvent;
+        private Fix64 ultimateFurthestDistanceSqr;
+        private long currentFrame;
 
         public PlayerEntity(
             int entityId,
@@ -53,7 +51,7 @@ namespace Combat.Core
 
         public LogicVector3 LogicalPosition { get; private set; }
         public LogicRotation LogicalRotation { get; private set; }
-        public float CurrentHP { get; private set; }
+        public Fix64 CurrentHP { get; private set; }
         public AttackState AttackState { get; private set; } = AttackState.None;
         public AttackPhase AttackPhase { get; private set; } = AttackPhase.None;
         public int AttackFrame { get; private set; }
@@ -72,25 +70,20 @@ namespace Combat.Core
             PreferredTargetId = targetEntityId;
         }
 
-        /// <summary>
-        /// 注入从 Animator 预采样得到的逐帧局部位移。
-        /// 正式锁步版本应把同样数据从 Luban 配置加载，而不是每个客户端各自采样 Animator。
-        /// </summary>
-        public void SetAttackMotionProfile(AttackState state, AttackMotionProfile profile)
+        internal void BeginFrame(long frame)
         {
-            if (profile == null)
-            {
-                attackMotionProfiles.Remove(state);
-                return;
-            }
-
-            attackMotionProfiles[state] = profile;
+            currentFrame = frame;
         }
 
-        public AttackMotionProfile GetAttackMotionProfile(AttackState state)
+        public void DrainEvents(List<CombatEvent> destination)
         {
-            attackMotionProfiles.TryGetValue(state, out AttackMotionProfile profile);
-            return profile;
+            if (destination == null)
+            {
+                throw new ArgumentNullException(nameof(destination));
+            }
+
+            destination.AddRange(pendingEvents);
+            pendingEvents.Clear();
         }
 
         public void ResetForTesting(
@@ -106,7 +99,7 @@ namespace Combat.Core
             knockbackVelocity = LogicVector3.Zero;
             IsDead = false;
             IsHurt = false;
-            hurtTimer = 0f;
+            hurtTimer = Fix64.Zero;
             comboHitCount = 0;
             comboCounterWindowRemaining = 0;
             bufferedAttack = AttackState.None;
@@ -117,12 +110,12 @@ namespace Combat.Core
         /// <summary>
         /// 推进一个逻辑帧。所有输入都是逻辑语义，不是键盘或鼠标原始设备状态。
         /// </summary>
-        public void Tick(
+        internal void Tick(
             CombatInputFrame input,
-            float deltaTime,
+            Fix64 deltaTime,
             IReadOnlyList<PlayerEntity> combatants)
         {
-            if (deltaTime <= 0f)
+            if (deltaTime <= Fix64.Zero)
             {
                 return;
             }
@@ -145,14 +138,6 @@ namespace Combat.Core
 
             ApplyMovement(input, deltaTime);
             ClampToMap();
-        }
-
-        public void FixedUpdateLogic(
-            CombatInputFrame input,
-            float deltaTime,
-            IReadOnlyList<PlayerEntity> combatants)
-        {
-            Tick(input, deltaTime, combatants);
         }
 
         private void HandleInput(
@@ -226,7 +211,7 @@ namespace Combat.Core
 
             if (AttackState == AttackState.JumpAttack)
             {
-                AttackMotionProfile profile = GetAttackMotionProfile(AttackState.JumpAttack);
+                AttackMotionProfile profile = attack.GetMotionProfile();
                 int animationFrameCount = profile != null && profile.FrameCount > 0
                     ? profile.FrameCount
                     : Math.Max(recoveryEnd, activeEnd);
@@ -242,9 +227,12 @@ namespace Combat.Core
                 else if (profile != null && profile.FrameCount > 0)
                 {
                     activeStart = Clamp(
-                        (int)Math.Ceiling(
-                            animationFrameCount *
-                            Math.Max(0f, Math.Min(1f, config.UltimateHitNormalizedFallback))),
+                        Fix64.Ceiling(
+                            Fix64.FromInt(animationFrameCount) *
+                            Fix64.Clamp(
+                                config.UltimateHitNormalizedFallback,
+                                Fix64.Zero,
+                                Fix64.One)).ToInt(),
                         1,
                         animationFrameCount);
                 }
@@ -324,7 +312,11 @@ namespace Combat.Core
             bufferedAttack = AttackState.None;
             ultimateInputBuffered = false;
             hitTargetsThisAttack.Clear();
-            Raise(CombatEventType.AttackStarted, nextState);
+            Raise(
+                CombatEventType.AttackStarted,
+                EntityId,
+                0,
+                nextState);
         }
 
         private void FinishAttack()
@@ -350,7 +342,7 @@ namespace Combat.Core
             AttackState state,
             CombatAttackConfig attack)
         {
-            AttackMotionProfile profile = GetAttackMotionProfile(state);
+            AttackMotionProfile profile = attack.GetMotionProfile();
             if (state == AttackState.JumpAttack &&
                 profile?.FrameDeltas != null &&
                 profile.HorizontalDistance > Epsilon)
@@ -368,7 +360,7 @@ namespace Combat.Core
                 return;
             }
 
-            float distance = Math.Max(0f, attack.ForwardMoveDistance);
+            Fix64 distance = Fix64.Max(Fix64.Zero, attack.ForwardMoveDistance);
             if (distance <= Epsilon)
             {
                 return;
@@ -395,7 +387,7 @@ namespace Combat.Core
             }
 
             LogicVector3 displacement = (LogicalPosition - ultimateStartPosition).FlattenY();
-            float distanceSqr = displacement.SqrMagnitude;
+            Fix64 distanceSqr = displacement.SqrMagnitude;
             if (distanceSqr > ultimateFurthestDistanceSqr)
             {
                 ultimateFurthestDistanceSqr = distanceSqr;
@@ -411,7 +403,7 @@ namespace Combat.Core
             CollectTargets(combatants, targetBuffer);
             LogicAabb attackBounds = BuildAttackBounds(attack);
             bool connectedOrdinaryAttack = false;
-            float knockbackSpeed = GetComboAwareKnockbackSpeed(state, attack);
+            Fix64 knockbackSpeed = GetComboAwareKnockbackSpeed(state, attack);
 
             for (int i = 0; i < targetBuffer.Count; i++)
             {
@@ -515,7 +507,7 @@ namespace Combat.Core
         /// </summary>
         public void ReceiveHit(
             PlayerEntity attacker,
-            float damage,
+            Fix64 damage,
             LogicVector3 incomingKnockbackVelocity)
         {
             if (IsDead)
@@ -523,16 +515,20 @@ namespace Combat.Core
                 return;
             }
 
-            CurrentHP = Math.Max(0f, CurrentHP - Math.Max(0f, damage));
-            if (CurrentHP <= 0f)
+            CurrentHP = Fix64.Max(
+                Fix64.Zero,
+                CurrentHP - Fix64.Max(Fix64.Zero, damage));
+            if (CurrentHP <= Fix64.Zero)
             {
-                Die();
+                Die(attacker, damage);
                 return;
             }
 
             CancelAttack();
             IsHurt = true;
-            hurtTimer = Math.Max(hurtTimer, Math.Max(0f, config.HitStunDuration));
+            hurtTimer = Fix64.Max(
+                hurtTimer,
+                Fix64.Max(Fix64.Zero, config.HitStunDuration));
 
             LogicVector3 horizontalVelocity = incomingKnockbackVelocity.FlattenY();
             if (horizontalVelocity.SqrMagnitude <= Epsilon * Epsilon)
@@ -541,10 +537,15 @@ namespace Combat.Core
             }
 
             knockbackVelocity = horizontalVelocity;
-            Raise(CombatEventType.HitReaction);
+            Raise(
+                CombatEventType.HitReaction,
+                attacker?.EntityId ?? 0,
+                EntityId,
+                AttackState.None,
+                damage);
         }
 
-        private void Die()
+        private void Die(PlayerEntity attacker, Fix64 damage)
         {
             CurrentHP = 0f;
             IsDead = true;
@@ -552,7 +553,12 @@ namespace Combat.Core
             hurtTimer = 0f;
             knockbackVelocity = LogicVector3.Zero;
             CancelAttack();
-            Raise(CombatEventType.Died);
+            Raise(
+                CombatEventType.Died,
+                attacker?.EntityId ?? 0,
+                EntityId,
+                AttackState.None,
+                damage);
         }
 
         private void CancelAttack()
@@ -567,7 +573,7 @@ namespace Combat.Core
             hitTargetsThisAttack.Clear();
         }
 
-        private void UpdateHurtAndKnockback(float deltaTime)
+        private void UpdateHurtAndKnockback(Fix64 deltaTime)
         {
             if (!IsHurt)
             {
@@ -577,7 +583,9 @@ namespace Combat.Core
             LogicalPosition += knockbackVelocity * deltaTime;
             knockbackVelocity = MoveTowardsZero(
                 knockbackVelocity,
-                Math.Max(0f, config.KnockbackFriction) * deltaTime);
+                Fix64.Max(
+                    Fix64.Zero,
+                    config.KnockbackFriction) * deltaTime);
 
             hurtTimer -= deltaTime;
             if (hurtTimer <= 0f)
@@ -590,7 +598,7 @@ namespace Combat.Core
             ClampToMap();
         }
 
-        private void ApplyMovement(CombatInputFrame input, float deltaTime)
+        private void ApplyMovement(CombatInputFrame input, Fix64 deltaTime)
         {
             if (!input.HasMoveInput)
             {
@@ -605,7 +613,7 @@ namespace Combat.Core
             }
 
             LogicVector3 moveDirection = flattenedInput.Normalized();
-            float speed = Math.Max(0f, config.MoveSpeed);
+            Fix64 speed = Fix64.Max(Fix64.Zero, config.MoveSpeed);
             LogicalPosition += moveDirection * (speed * deltaTime);
             LogicalRotation = LogicRotation.SmoothTowards(
                 LogicalRotation,
@@ -619,7 +627,7 @@ namespace Combat.Core
             CollectTargets(combatants, targetBuffer);
 
             PlayerEntity nearest = null;
-            float nearestDistanceSqr = float.PositiveInfinity;
+            Fix64 nearestDistanceSqr = Fix64.MaxValue;
             for (int i = 0; i < targetBuffer.Count; i++)
             {
                 PlayerEntity candidate = targetBuffer[i];
@@ -628,7 +636,7 @@ namespace Combat.Core
                     continue;
                 }
 
-                float distanceSqr = (candidate.LogicalPosition - LogicalPosition)
+                Fix64 distanceSqr = (candidate.LogicalPosition - LogicalPosition)
                     .FlattenY()
                     .SqrMagnitude;
                 if (distanceSqr > Epsilon * Epsilon && distanceSqr < nearestDistanceSqr)
@@ -648,7 +656,7 @@ namespace Combat.Core
             LogicalRotation = LogicRotation.LookTowards(direction);
         }
 
-        private float GetComboAwareKnockbackSpeed(
+        private Fix64 GetComboAwareKnockbackSpeed(
             AttackState state,
             CombatAttackConfig attack)
         {
@@ -660,35 +668,44 @@ namespace Combat.Core
             if ((!isThirdOrdinaryHit && !isUltimateHit) ||
                 config.KnockbackFriction <= Epsilon)
             {
-                return Math.Max(0f, attack.KnockbackSpeed);
+                return Fix64.Max(
+                    Fix64.Zero,
+                    attack.KnockbackSpeed);
             }
 
-            float movementDistance = GetUltimateMovementDistance();
+            Fix64 movementDistance = GetUltimateMovementDistance();
             if (movementDistance <= Epsilon)
             {
-                return Math.Max(0f, attack.KnockbackSpeed);
+                return Fix64.Max(
+                    Fix64.Zero,
+                    attack.KnockbackSpeed);
             }
 
-            float desiredDistance =
-                movementDistance * Math.Max(0f, config.UltimateKnockbackDistanceScale);
-            return (float)Math.Sqrt(
-                2f * config.KnockbackFriction * desiredDistance);
+            Fix64 desiredDistance =
+                movementDistance * Fix64.Max(
+                    Fix64.Zero,
+                    config.UltimateKnockbackDistanceScale);
+            return Fix64.Sqrt(
+                Fix64.FromInt(2) *
+                config.KnockbackFriction *
+                desiredDistance);
         }
 
-        private float GetUltimateMovementDistance()
+        private Fix64 GetUltimateMovementDistance()
         {
-            AttackMotionProfile profile =
-                GetAttackMotionProfile(AttackState.JumpAttack);
+            CombatAttackConfig jumpAttack =
+                config.FindAttack(AttackState.JumpAttack);
+            AttackMotionProfile profile = jumpAttack?.GetMotionProfile();
             if (profile != null && profile.HorizontalDistance > Epsilon)
             {
                 return profile.HorizontalDistance;
             }
 
-            CombatAttackConfig jumpAttack =
-                config.FindAttack(AttackState.JumpAttack);
             return jumpAttack != null
-                ? Math.Max(0f, jumpAttack.ForwardMoveDistance)
-                : 0f;
+                ? Fix64.Max(
+                    Fix64.Zero,
+                    jumpAttack.ForwardMoveDistance)
+                : Fix64.Zero;
         }
 
         private void TickComboCounterWindow()
@@ -727,16 +744,25 @@ namespace Combat.Core
 
         private void Raise(
             CombatEventType eventType,
-            AttackState attackState = AttackState.None)
+            int sourceEntityId,
+            int targetEntityId,
+            AttackState attackState = AttackState.None,
+            Fix64 damage = default)
         {
-            CombatEvent?.Invoke(new CombatEvent(eventType, attackState));
+            pendingEvents.Add(new CombatEvent(
+                currentFrame,
+                eventType,
+                sourceEntityId,
+                targetEntityId,
+                attackState,
+                damage));
         }
 
         private static LogicVector3 MoveTowardsZero(
             LogicVector3 value,
-            float maxDistanceDelta)
+            Fix64 maxDistanceDelta)
         {
-            float magnitude = value.Magnitude;
+            Fix64 magnitude = value.Magnitude;
             if (magnitude <= maxDistanceDelta || magnitude <= Epsilon)
             {
                 return LogicVector3.Zero;
@@ -750,10 +776,10 @@ namespace Combat.Core
             return value < min ? min : value > max ? max : value;
         }
 
-        private static float Clamp(float value, float min, float max)
+        private static Fix64 Clamp(Fix64 value, Fix64 min, Fix64 max)
         {
-            float low = Math.Min(min, max);
-            float high = Math.Max(min, max);
+            Fix64 low = Fix64.Min(min, max);
+            Fix64 high = Fix64.Max(min, max);
             return value < low ? low : value > high ? high : value;
         }
     }

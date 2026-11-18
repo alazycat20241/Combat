@@ -33,6 +33,10 @@ public sealed partial class CombatAttackConfig : Luban.BeanBase
         { if(!_buf["ForwardMoveEndFrame"].IsNumber) { throw new SerializationException(); }  ForwardMoveEndFrame = _buf["ForwardMoveEndFrame"]; }
         { if(!_buf["AttackBoxSize"].IsObject) { throw new SerializationException(); }  AttackBoxSize = global::cfg.vector3.Deserializevector3(_buf["AttackBoxSize"]);  }
         { if(!_buf["AttackBoxLocalOffset"].IsObject) { throw new SerializationException(); }  AttackBoxLocalOffset = global::cfg.vector3.Deserializevector3(_buf["AttackBoxLocalOffset"]);  }
+        { if(!_buf["MotionData"].IsString) { throw new SerializationException(); }  MotionData = _buf["MotionData"]; }
+        { if(!_buf["MotionLandingFrame"].IsNumber) { throw new SerializationException(); }  MotionLandingFrame = _buf["MotionLandingFrame"]; }
+        { if(!_buf["MotionLastHorizontalFrame"].IsNumber) { throw new SerializationException(); }  MotionLastHorizontalFrame = _buf["MotionLastHorizontalFrame"]; }
+        { if(!_buf["MotionHorizontalDistance"].IsNumber) { throw new SerializationException(); }  MotionHorizontalDistance = _buf["MotionHorizontalDistance"]; }
     }
 
     public static CombatAttackConfig DeserializeCombatAttackConfig(JSONNode _buf)
@@ -92,6 +96,22 @@ public sealed partial class CombatAttackConfig : Luban.BeanBase
     /// 攻击框偏移
     /// </summary>
     public readonly vector3 AttackBoxLocalOffset;
+    /// <summary>
+    /// 逐帧局部位移，格式 x,y,z;x,y,z
+    /// </summary>
+    public readonly string MotionData;
+    /// <summary>
+    /// 落地判定帧，0 表示无
+    /// </summary>
+    public readonly int MotionLandingFrame;
+    /// <summary>
+    /// 最后水平位移帧
+    /// </summary>
+    public readonly int MotionLastHorizontalFrame;
+    /// <summary>
+    /// 水平净位移
+    /// </summary>
+    public readonly float MotionHorizontalDistance;
    
     public const int __ID__ = -1858287394;
     public override int GetTypeId() => __ID__;
@@ -116,6 +136,10 @@ public sealed partial class CombatAttackConfig : Luban.BeanBase
         + "ForwardMoveEndFrame:" + ForwardMoveEndFrame + ","
         + "AttackBoxSize:" + AttackBoxSize + ","
         + "AttackBoxLocalOffset:" + AttackBoxLocalOffset + ","
+        + "MotionData:" + MotionData + ","
+        + "MotionLandingFrame:" + MotionLandingFrame + ","
+        + "MotionLastHorizontalFrame:" + MotionLastHorizontalFrame + ","
+        + "MotionHorizontalDistance:" + MotionHorizontalDistance + ","
         + "}";
     }
 }

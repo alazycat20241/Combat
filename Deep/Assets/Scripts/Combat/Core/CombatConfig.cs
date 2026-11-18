@@ -32,15 +32,89 @@ namespace Combat.Core
         public int ActiveStartFrame = 5;
         public int ActiveEndFrame = 10;
         public int RecoveryFrames = 7;
-        public float Damage = 10f;
-        public float KnockbackSpeed = 5f;
+        public Fix64 Damage = 10f;
+        public Fix64 KnockbackSpeed = 5f;
 
-        public float ForwardMoveDistance = 0.35f;
+        public Fix64 ForwardMoveDistance = 0.35f;
         public int ForwardMoveStartFrame = 1;
         public int ForwardMoveEndFrame = 4;
 
         public LogicVector3 AttackBoxSize = new LogicVector3(1.25f, 0.9f, 1.4f);
         public LogicVector3 AttackBoxLocalOffset = new LogicVector3(0f, 0.9f, 0.8f);
+
+        // 由动画离线烘焙，格式：x,y,z;x,y,z;x,y,z
+        public string MotionData = string.Empty;
+        public int MotionLandingFrame;
+        public int MotionLastHorizontalFrame;
+        public Fix64 MotionHorizontalDistance;
+
+        private AttackMotionProfile cachedMotionProfile;
+
+        public AttackMotionProfile GetMotionProfile()
+        {
+            if (cachedMotionProfile != null)
+            {
+                return cachedMotionProfile;
+            }
+
+            if (string.IsNullOrWhiteSpace(MotionData))
+            {
+                return null;
+            }
+
+            string[] frameTexts = MotionData.Split(
+                new[] { ';' },
+                StringSplitOptions.RemoveEmptyEntries);
+            LogicVector3[] frameDeltas = new LogicVector3[frameTexts.Length];
+
+            for (int i = 0; i < frameTexts.Length; i++)
+            {
+                string[] parts = frameTexts[i].Split(',');
+                if (parts.Length < 3)
+                {
+                    throw new FormatException(
+                        $"Invalid MotionData at frame {i + 1}: {frameTexts[i]}");
+                }
+
+                try
+                {
+                    frameDeltas[i] = new LogicVector3(
+                        Fix64.Parse(parts[0]),
+                        Fix64.Parse(parts[1]),
+                        Fix64.Parse(parts[2]));
+                }
+                catch (Exception exception)
+                {
+                    throw new FormatException(
+                        $"Invalid MotionData at frame {i + 1}: {frameTexts[i]}",
+                        exception);
+                }
+            }
+
+            cachedMotionProfile = new AttackMotionProfile
+            {
+                FrameDeltas = frameDeltas,
+                LandingFrame = Math.Max(0, MotionLandingFrame),
+                LastHorizontalFrame = MotionLastHorizontalFrame > 0
+                    ? MotionLastHorizontalFrame
+                    : frameDeltas.Length,
+                HorizontalDistance = MotionHorizontalDistance > Fix64.Zero
+                    ? MotionHorizontalDistance
+                    : CalculateHorizontalDistance(frameDeltas)
+            };
+            return cachedMotionProfile;
+        }
+
+        private static Fix64 CalculateHorizontalDistance(LogicVector3[] frames)
+        {
+            LogicVector3 cumulative = LogicVector3.Zero;
+            for (int i = 0; i < frames.Length; i++)
+            {
+                cumulative += frames[i];
+            }
+
+            return cumulative.FlattenY().Magnitude;
+        }
     }
 
     /// <summary>
@@ -53,25 +127,25 @@ namespace Combat.Core
         public int Id;
         public string Name = string.Empty;
 
-        public float MaxHP = 100f;
-        public float MoveSpeed = 5f;
-        public float MoveInputDeadZone = 0.1f;
-        public float RotationSharpness = 10f;
+        public Fix64 MaxHP = 100f;
+        public Fix64 MoveSpeed = 5f;
+        public Fix64 MoveInputDeadZone = 0.1f;
+        public Fix64 RotationSharpness = 10f;
 
-        public float MapMinX = -10f;
-        public float MapMaxX = 10f;
-        public float MapMinZ = -10f;
-        public float MapMaxZ = 10f;
+        public Fix64 MapMinX = -10f;
+        public Fix64 MapMaxX = 10f;
+        public Fix64 MapMinZ = -10f;
+        public Fix64 MapMaxZ = 10f;
 
-        public float HitStunDuration = 0.4f;
-        public float KnockbackFriction = 28f;
+        public Fix64 HitStunDuration = 0.4f;
+        public Fix64 KnockbackFriction = 28f;
         public LogicVector3 HurtBoxSize = new LogicVector3(0.8f, 1.8f, 0.8f);
         public LogicVector3 HurtBoxLocalOffset = new LogicVector3(0f, 0.9f, 0f);
 
         public int RequiredComboHits = 3;
         public int ComboCounterWindowFrames = 30;
-        public float UltimateKnockbackDistanceScale = 1f;
-        public float UltimateHitNormalizedFallback = 0.9f;
+        public Fix64 UltimateKnockbackDistanceScale = 1f;
+        public Fix64 UltimateHitNormalizedFallback = 0.9f;
         public int UltimateHitWindowFrames = 1;
         public bool AllowSelfHitWhenNoTarget = true;
 
@@ -153,17 +227,38 @@ namespace Combat.Core
         public LogicVector3[] FrameDeltas;
         public int LandingFrame;
         public int LastHorizontalFrame;
-        public float HorizontalDistance;
+        public Fix64 HorizontalDistance;
 
         public int FrameCount => FrameDeltas?.Length ?? 0;
     }
 
     public struct CombatInputFrame
     {
+        public int TargetEntityId;
         public bool PrimaryAttackPressed;
         public bool SecondaryAttackPressed;
         public bool UltimatePressed;
         public bool HasMoveInput;
         public LogicVector3 MoveDirection;
+    }
+
+    /// <summary>
+    /// 网络传输和逻辑回放使用的一帧输入命令。
+    /// </summary>
+    public readonly struct CombatInputCommand
+    {
+        public readonly long Frame;
+        public readonly int EntityId;
+        public readonly CombatInputFrame Input;
+
+        public CombatInputCommand(
+            long frame,
+            int entityId,
+            CombatInputFrame input)
+        {
+            Frame = frame;
+            EntityId = entityId;
+            Input = input;
+        }
     }
 }

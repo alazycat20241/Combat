@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using Combat.Config;
 using Combat.Core;
 using Luban.SimpleJSON;
@@ -162,28 +161,28 @@ namespace LubanIntegration
             {
                 Id = GetInt(row, defaults.Id, "Id", "id"),
                 Name = GetString(row, defaults.Name, "Name", "name"),
-                MaxHP = GetFloat(row, defaults.MaxHP, "MaxHP", "maxHP", "maxHp"),
-                MoveSpeed = GetFloat(row, defaults.MoveSpeed, "MoveSpeed", "moveSpeed"),
-                MoveInputDeadZone = GetFloat(
+                MaxHP = GetFix64(row, defaults.MaxHP, "MaxHP", "maxHP", "maxHp"),
+                MoveSpeed = GetFix64(row, defaults.MoveSpeed, "MoveSpeed", "moveSpeed"),
+                MoveInputDeadZone = GetFix64(
                     row,
                     defaults.MoveInputDeadZone,
                     "MoveInputDeadZone",
                     "moveInputDeadZone"),
-                RotationSharpness = GetFloat(
+                RotationSharpness = GetFix64(
                     row,
                     defaults.RotationSharpness,
                     "RotationSharpness",
                     "rotationSharpness"),
-                MapMinX = GetFloat(row, defaults.MapMinX, "MapMinX", "mapMinX"),
-                MapMaxX = GetFloat(row, defaults.MapMaxX, "MapMaxX", "mapMaxX"),
-                MapMinZ = GetFloat(row, defaults.MapMinZ, "MapMinZ", "mapMinZ"),
-                MapMaxZ = GetFloat(row, defaults.MapMaxZ, "MapMaxZ", "mapMaxZ"),
-                HitStunDuration = GetFloat(
+                MapMinX = GetFix64(row, defaults.MapMinX, "MapMinX", "mapMinX"),
+                MapMaxX = GetFix64(row, defaults.MapMaxX, "MapMaxX", "mapMaxX"),
+                MapMinZ = GetFix64(row, defaults.MapMinZ, "MapMinZ", "mapMinZ"),
+                MapMaxZ = GetFix64(row, defaults.MapMaxZ, "MapMaxZ", "mapMaxZ"),
+                HitStunDuration = GetFix64(
                     row,
                     defaults.HitStunDuration,
                     "HitStunDuration",
                     "hitStunDuration"),
-                KnockbackFriction = GetFloat(
+                KnockbackFriction = GetFix64(
                     row,
                     defaults.KnockbackFriction,
                     "KnockbackFriction",
@@ -208,12 +207,12 @@ namespace LubanIntegration
                     defaults.ComboCounterWindowFrames,
                     "ComboCounterWindowFrames",
                     "comboCounterWindowFrames"),
-                UltimateKnockbackDistanceScale = GetFloat(
+                UltimateKnockbackDistanceScale = GetFix64(
                     row,
                     defaults.UltimateKnockbackDistanceScale,
                     "UltimateKnockbackDistanceScale",
                     "ultimateKnockbackDistanceScale"),
-                UltimateHitNormalizedFallback = GetFloat(
+                UltimateHitNormalizedFallback = GetFix64(
                     row,
                     defaults.UltimateHitNormalizedFallback,
                     "UltimateHitNormalizedFallback",
@@ -261,13 +260,13 @@ namespace LubanIntegration
                     defaults.RecoveryFrames,
                     "RecoveryFrames",
                     "recoveryFrames"),
-                Damage = GetFloat(row, defaults.Damage, "Damage", "damage"),
-                KnockbackSpeed = GetFloat(
+                Damage = GetFix64(row, defaults.Damage, "Damage", "damage"),
+                KnockbackSpeed = GetFix64(
                     row,
                     defaults.KnockbackSpeed,
                     "KnockbackSpeed",
                     "knockbackSpeed"),
-                ForwardMoveDistance = GetFloat(
+                ForwardMoveDistance = GetFix64(
                     row,
                     defaults.ForwardMoveDistance,
                     "ForwardMoveDistance",
@@ -291,7 +290,27 @@ namespace LubanIntegration
                     row,
                     defaults.AttackBoxLocalOffset,
                     "AttackBoxLocalOffset",
-                    "attackBoxLocalOffset")
+                    "attackBoxLocalOffset"),
+                MotionData = GetString(
+                    row,
+                    defaults.MotionData,
+                    "MotionData",
+                    "motionData"),
+                MotionLandingFrame = GetInt(
+                    row,
+                    defaults.MotionLandingFrame,
+                    "MotionLandingFrame",
+                    "motionLandingFrame"),
+                MotionLastHorizontalFrame = GetInt(
+                    row,
+                    defaults.MotionLastHorizontalFrame,
+                    "MotionLastHorizontalFrame",
+                    "motionLastHorizontalFrame"),
+                MotionHorizontalDistance = GetFix64(
+                    row,
+                    defaults.MotionHorizontalDistance,
+                    "MotionHorizontalDistance",
+                    "motionHorizontalDistance")
             };
         }
 
@@ -364,19 +383,19 @@ namespace LubanIntegration
             return node != null ? node.AsInt : fallback;
         }
 
-        private static float GetFloat(JSONNode row, params string[] keys)
+        private static Fix64 GetFix64(JSONNode row, params string[] keys)
         {
             JSONNode node = GetNode(row, keys);
-            return node != null ? node.AsFloat : 0f;
+            return node != null ? Fix64.Parse(node.Value) : Fix64.Zero;
         }
 
-        private static float GetFloat(
+        private static Fix64 GetFix64(
             JSONNode row,
-            float fallback,
+            Fix64 fallback,
             params string[] keys)
         {
             JSONNode node = GetNode(row, keys);
-            return node != null ? node.AsFloat : fallback;
+            return node != null ? Fix64.Parse(node.Value) : fallback;
         }
 
         private static bool GetBool(
@@ -407,27 +426,34 @@ namespace LubanIntegration
             if (node.IsArray && node.Count >= 3)
             {
                 return new LogicVector3(
-                    node[0].AsFloat,
-                    node[1].AsFloat,
-                    node[2].AsFloat);
+                    Fix64.Parse(node[0].Value),
+                    Fix64.Parse(node[1].Value),
+                    Fix64.Parse(node[2].Value));
             }
 
             JSONNode x = GetNode(node, "X", "x");
             if (x != null)
             {
                 return new LogicVector3(
-                    GetFloat(node, "X", "x"),
-                    GetFloat(node, "Y", "y"),
-                    GetFloat(node, "Z", "z"));
+                    GetFix64(node, "X", "x"),
+                    GetFix64(node, "Y", "y"),
+                    GetFix64(node, "Z", "z"));
             }
 
             string[] parts = node.Value.Split(',');
-            if (parts.Length >= 3 &&
-                float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float px) &&
-                float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float py) &&
-                float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float pz))
+            if (parts.Length >= 3)
             {
-                return new LogicVector3(px, py, pz);
+                try
+                {
+                    return new LogicVector3(
+                        Fix64.Parse(parts[0]),
+                        Fix64.Parse(parts[1]),
+                        Fix64.Parse(parts[2]));
+                }
+                catch (FormatException)
+                {
+                    return fallback;
+                }
             }
 
             return fallback;
