@@ -1,0 +1,47 @@
+syntax = "proto3";
+package Fantasy.Network.Message;
+
+message C2G_TestMessage // IMessage
+{
+	string Tag = 1;
+}
+message C2G_TestRequest // IRequest,G2C_TestResponse
+{
+	string Tag = 1;
+}
+message G2C_TestResponse // IResponse
+{
+	string Tag = 1;
+}
+
+// 客户端连接成功后请求加入锁步房间。
+// 服务端通过 Session 绑定玩家身份，并按加入顺序分配唯一 PlayerId。
+message C2G_JoinLockstep // IMessage
+{
+}
+
+// 服务端向客户端下发其唯一的锁步 PlayerId。
+message G2C_PlayerAssigned // IMessage
+{
+	int32 playerId = 1;
+}
+
+// 客户端向 Gate 提交某一逻辑帧的输入。
+// 服务端不从此消息读取 PlayerId，而是根据 Session 绑定关系确定身份。
+message C2G_SubmitFrameInput // IMessage
+{
+	int32 frameId = 1;
+	int32 inputMask = 2;
+}
+
+message PlayerInputData
+{
+	int32 playerId = 1;
+	int32 inputMask = 2;
+}
+
+message G2C_FrameData // IMessage
+{
+	int32 frameId = 1;
+	repeated PlayerInputData inputs = 2;
+}

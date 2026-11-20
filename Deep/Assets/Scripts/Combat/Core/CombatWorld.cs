@@ -113,6 +113,34 @@ namespace Combat.Core
             frameInputs.Add(command.EntityId, command.Input);
         }
 
+        /// <summary>
+        /// 提交一组网络中已经确认的完整帧输入，并立刻推进一个逻辑帧。
+        ///
+        /// 这个入口只接收纯 C# 数据，不知道输入来自 KCP、测试程序还是录像回放。
+        /// LockstepManager 必须先确认该帧号等于 NextFrame，再调用本方法，确保不会
+        /// 因服务端丢帧或乱序而提前执行未来帧。
+        /// </summary>
+        public void Tick(
+            IReadOnlyDictionary<int, CombatInputFrame> frameInputs)
+        {
+            if (frameInputs == null)
+            {
+                throw new ArgumentNullException(nameof(frameInputs));
+            }
+
+            long executingFrame = NextFrame;
+
+            foreach (KeyValuePair<int, CombatInputFrame> pair in frameInputs)
+            {
+                SubmitInput(new CombatInputCommand(
+                    executingFrame,
+                    pair.Key,
+                    pair.Value));
+            }
+
+            Step();
+        }
+
         public void DrainEvents(List<CombatEvent> destination)
         {
             if (destination == null)

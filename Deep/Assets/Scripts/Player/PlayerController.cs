@@ -34,7 +34,6 @@ public sealed class PlayerController : MonoBehaviour
     [Tooltip("取消勾选后这个角色只接收受击，不读取输入，适合训练木桩")]
     [SerializeField] private bool acceptPlayerInput = true;
 
-    [SerializeField] private Transform cameraTransform;
     [SerializeField] private Animator animator;
 
     [Header("输入 Action（留空自动读取键鼠）")]
@@ -42,6 +41,8 @@ public sealed class PlayerController : MonoBehaviour
     [SerializeField] private InputActionReference primaryAttackInputReference;
     [SerializeField] private InputActionReference secondaryAttackInputReference;
     [SerializeField] private InputActionReference ultimateInputReference;
+        [Tooltip("WASD 相对哪个 Transform 解释。留空时使用 Camera.main")]
+        [SerializeField] private Transform movementReference;
 
     [Header("表现平滑")]
     [SerializeField, Min(0f)] private float visualFollowSharpness = 25f;
@@ -59,6 +60,7 @@ public sealed class PlayerController : MonoBehaviour
     private bool ultimateInputLatched;
     private int ultimateVisualSyncEndFrame = -1;
     private bool initialized;
+        private Transform cachedMovementReference;
 
     public PlayerEntity Entity => entity;
     public PlayerCombatConfig Config => config;
@@ -123,11 +125,6 @@ public sealed class PlayerController : MonoBehaviour
             animator.applyRootMotion = false;
         }
 
-        if (cameraTransform == null && Camera.main != null)
-        {
-            cameraTransform = Camera.main.transform;
-        }
-
         runtimeEntityId = networkEntityId > 0
             ? networkEntityId
             : nextRuntimeEntityId++;
@@ -151,7 +148,9 @@ public sealed class PlayerController : MonoBehaviour
     {
         if (entity != null)
         {
-            CombatSimulationRunner.World?.RegisterEntity(entity);
+            CombatSimulationRunner.Lockstep?.RegisterPlayer(
+                entity.EntityId,
+                entity);
             CombatSimulationRunner.EventCommitted -= OnCombatEvent;
             CombatSimulationRunner.EventCommitted += OnCombatEvent;
         }
@@ -165,7 +164,7 @@ public sealed class PlayerController : MonoBehaviour
         }
 
         CombatSimulationRunner.EventCommitted -= OnCombatEvent;
-        CombatSimulationRunner.World?.UnregisterEntity(entity);
+        CombatSimulationRunner.Lockstep?.UnregisterPlayer(entity.EntityId);
     }
 
     private void Update()
@@ -221,33 +220,21 @@ public sealed class PlayerController : MonoBehaviour
             return;
         }
 
-        CombatInputFrame input = new CombatInputFrame
-        {
-            PrimaryAttackPressed = primaryAttackInputLatched,
-            SecondaryAttackPressed = secondaryAttackInputLatched,
-            UltimatePressed = ultimateInputLatched
-        };
-
-        LogicVector3 moveDirection = BuildWorldMoveDirection(moveInput);
-        input.HasMoveInput = moveDirection.SqrMagnitude > 0.000001f;
-        input.MoveDirection = moveDirection;
+        FrameInputMask inputMask = BuildFrameInputMask();
 
         primaryAttackInputLatched = false;
         secondaryAttackInputLatched = false;
         ultimateInputLatched = false;
 
-        input.TargetEntityId =
-            combatTarget != null && combatTarget.Entity != null
-                ? combatTarget.Entity.EntityId
-                : 0;
-
-        CombatWorld world = CombatSimulationRunner.World;
-        if (world != null)
+        LockstepManager lockstep = CombatSimulationRunner.Lockstep;
+        if (lockstep != null)
         {
-            world.SubmitInput(new CombatInputCommand(
-                world.NextFrame,
+            lockstep.SetPreferredTarget(
                 entity.EntityId,
-                input));
+                combatTarget != null && combatTarget.Entity != null
+                    ? combatTarget.Entity.EntityId
+                    : 0);
+            lockstep.SubmitLocalInput(entity.EntityId, inputMask);
         }
     }
 
@@ -277,29 +264,108 @@ public sealed class PlayerController : MonoBehaviour
         }
     }
 
-    private LogicVector3 BuildWorldMoveDirection(Vector2 input)
+    private FrameInputMask BuildFrameInputMask()
     {
-        if (!entity.CanMove || input.sqrMagnitude < config.MoveInputDeadZone * config.MoveInputDeadZone)
+        FrameInputMask mask = FrameInputMask.None;
+        if (primaryAttackInputLatched)
         {
-            return LogicVector3.Zero;
+            mask |= FrameInputMask.PrimaryAttack;
         }
 
-        input = Vector2.ClampMagnitude(input, 1f);
+        if (secondaryAttackInputLatched)
+        {
+            mask |= FrameInputMask.SecondaryAttack;
+        }
 
-        Vector3 cameraForward = cameraTransform != null
-            ? cameraTransform.forward
-            : Vector3.forward;
-        Vector3 cameraRight = cameraTransform != null
-            ? cameraTransform.right
-            : Vector3.right;
+        if (ultimateInputLatched)
+        {
+            mask |= FrameInputMask.Jump;
+        }
 
-        cameraForward.y = 0f;
-        cameraRight.y = 0f;
-        cameraForward.Normalize();
-        cameraRight.Normalize();
+        float deadZone = config.MoveInputDeadZone.ToFloat();
+        if (!entity.CanMove || moveInput.sqrMagnitude < deadZone * deadZone)
+        {
+            return mask;
+        }
 
-        Vector3 direction = (cameraForward * input.y) + (cameraRight * input.x);
-        return ToLogicVector(direction);
+        mask |= BuildCameraRelativeMoveMask(moveInput);
+        return mask;
+    }
+
+    /// <summary>
+    /// 把摄像机空间的 WASD 向量转换成确定性的世界方向掩码。
+    ///
+    /// Lockstep 网络里只有离散方向位，没有浮点摄像机角度。因此这里把摄像机
+    /// 前方/右方投影到 XZ 平面，再量化到最近的 8 个世界方向之一。
+    /// 服务端和其他客户端只回放最终的世界方向位，不会依赖各自摄像机角度。
+    /// </summary>
+    private FrameInputMask BuildCameraRelativeMoveMask(Vector2 input)
+    {
+        Transform reference = ResolveMovementReference();
+        Vector3 worldDirection;
+
+        if (reference == null)
+        {
+            worldDirection = new Vector3(input.x, 0f, input.y);
+        }
+        else
+        {
+            Vector3 cameraForward = reference.forward;
+            Vector3 cameraRight = reference.right;
+            cameraForward.y = 0f;
+            cameraRight.y = 0f;
+            cameraForward.Normalize();
+            cameraRight.Normalize();
+
+            worldDirection =
+                cameraForward * input.y +
+                cameraRight * input.x;
+        }
+
+        if (worldDirection.sqrMagnitude <= 0.000001f)
+        {
+            return FrameInputMask.None;
+        }
+
+        FrameInputMask mask = FrameInputMask.None;
+        float absX = Mathf.Abs(worldDirection.x);
+        float absZ = Mathf.Abs(worldDirection.z);
+        const float diagonalCutoff = 0.41421356f;
+
+        bool pureVertical = absX < absZ * diagonalCutoff;
+        bool pureHorizontal = absZ < absX * diagonalCutoff;
+
+        if (!pureHorizontal)
+        {
+            mask |= worldDirection.z >= 0f
+                ? FrameInputMask.MoveForward
+                : FrameInputMask.MoveBackward;
+        }
+
+        if (!pureVertical)
+        {
+            mask |= worldDirection.x >= 0f
+                ? FrameInputMask.MoveRight
+                : FrameInputMask.MoveLeft;
+        }
+
+        return mask;
+    }
+
+    private Transform ResolveMovementReference()
+    {
+        if (movementReference != null)
+        {
+            cachedMovementReference = movementReference;
+            return cachedMovementReference;
+        }
+
+        if (cachedMovementReference == null && Camera.main != null)
+        {
+            cachedMovementReference = Camera.main.transform;
+        }
+
+        return cachedMovementReference;
     }
 
     private void UpdateLocomotionAnimation()

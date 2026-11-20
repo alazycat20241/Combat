@@ -1,26 +1,34 @@
-﻿using UnityEngine;
-using UnityEngine.InputSystem; 
+using Combat.Core;
+using UnityEngine;
+using UnityEngine.InputSystem;
 
-public class CameraController : MonoBehaviour
+/// <summary>
+/// 第三人称跟随摄像机。
+///
+/// 摄像机始终跟随服务端分给本客户端的 PlayerId 对应角色。
+/// 这样客户端 A 分到 1 时跟随 Player1，客户端 B 分到 2 时自动跟随 Player2。
+/// </summary>
+[DefaultExecutionOrder(20000)]
+public sealed class CameraController : MonoBehaviour
 {
-    [SerializeField] Transform followTarget;
-    [SerializeField] float rotationSpeed = 2f;
-    [SerializeField] float distance = 5;
+    [Header("跟随目标")]
+    [SerializeField] private Transform followTarget;
+    [SerializeField] private bool autoFollowLocalPlayer = true;
 
-    [SerializeField] float minVerticalAngle = -45;
-    [SerializeField] float maxVerticalAngle = 45;
+    [Header("轨道参数")]
+    [SerializeField, Min(0.01f)] private float rotationSpeed = 0.2f;
+    [SerializeField, Min(0.1f)] private float distance = 5f;
+    [SerializeField, Min(0f)] private float positionFollowSharpness = 30f;
+    [SerializeField] private float minVerticalAngle = -45f;
+    [SerializeField] private float maxVerticalAngle = 45f;
+    [SerializeField] private Vector2 framingOffset;
 
-    [SerializeField] Vector2 framingOffset;
-
-    float rotationX;
-    float rotationY;
-
-    // 声明新的输入控制类
     private PlayerControls playerControls;
     private Vector2 lookInput;
-
-    // 优化：缓存用于计算偏移的 Vector3，避免每帧产生垃圾（GC）
-    private Vector3 _frameOffsetVec;
+    private float rotationX;
+    private float rotationY;
+    private bool cameraInitialized;
+    private Transform currentResolvedTarget;
 
     private void Awake()
     {
@@ -29,40 +37,147 @@ public class CameraController : MonoBehaviour
 
     private void OnEnable()
     {
-        // 启用输入
         playerControls.Gameplay.Enable();
-
-        // 订阅鼠标/摇杆的移动事件
-        playerControls.Gameplay.Look.performed += ctx => lookInput = ctx.ReadValue<Vector2>();
-        // 当鼠标停止移动时，将输入归零，防止摄像机自己一直转
-        playerControls.Gameplay.Look.canceled += ctx => lookInput = Vector2.zero;
+        playerControls.Gameplay.Look.performed += OnLookPerformed;
+        playerControls.Gameplay.Look.canceled += OnLookCanceled;
     }
 
     private void OnDisable()
     {
+        playerControls.Gameplay.Look.performed -= OnLookPerformed;
+        playerControls.Gameplay.Look.canceled -= OnLookCanceled;
         playerControls.Gameplay.Disable();
     }
 
-    // 注意：如果你做的是严格帧同步的动作游戏，建议把这里改成 FixedUpdate 或者由逻辑帧去驱动！
     private void Update()
     {
-        // 优化：只在启动或面板修改时更新 offset 数据，不用每帧 new Vector3
-        _frameOffsetVec = new Vector3(framingOffset.x, framingOffset.y, 0);
+        ResolveLocalFollowTarget();
 
-        // 如果你想让鼠标/摇杆灵敏度完全由 Input System 面板控制，你甚至可以不用乘以 rotationSpeed
-        // 但这里为了保持你原代码的逻辑，我们乘上它
+        if (followTarget == null)
+        {
+            return;
+        }
+
         rotationX += lookInput.y * rotationSpeed;
-        rotationX = Mathf.Clamp(rotationX, minVerticalAngle, maxVerticalAngle);
+        rotationX = Mathf.Clamp(
+            rotationX,
+            minVerticalAngle,
+            maxVerticalAngle);
 
         rotationY += lookInput.x * rotationSpeed;
 
-        var targetRotation = Quaternion.Euler(rotationX, rotationY, 0);
+        Quaternion targetRotation =
+            Quaternion.Euler(rotationX, rotationY, 0f);
+        Vector3 focusPosition =
+            followTarget.position +
+            new Vector3(framingOffset.x, framingOffset.y, 0f);
+        Vector3 desiredPosition =
+            focusPosition -
+            targetRotation * (Vector3.forward * distance);
 
-        // 冗余剔除：直接使用缓存的 _frameOffsetVec 进行计算
-        var focusPosition = followTarget.position + _frameOffsetVec;
+        if (!cameraInitialized)
+        {
+            transform.SetPositionAndRotation(
+                desiredPosition,
+                targetRotation);
+            cameraInitialized = true;
+            return;
+        }
 
-        // 优化：将 new Vector3(0, 0, distance) 替换为 Vector3.forward * distance，逻辑一致但更清晰
-        transform.position = focusPosition - targetRotation * (Vector3.forward * distance);
+        float interpolation =
+            1f - Mathf.Exp(
+                -positionFollowSharpness * Time.deltaTime);
+
+        transform.position = Vector3.Lerp(
+            transform.position,
+            desiredPosition,
+            interpolation);
         transform.rotation = targetRotation;
+    }
+
+    private void ResolveLocalFollowTarget()
+    {
+        if (!autoFollowLocalPlayer)
+        {
+            return;
+        }
+
+        LockstepManager lockstep = CombatSimulationRunner.Lockstep;
+        if (lockstep == null ||
+            !lockstep.HasServerAssignedPlayerId)
+        {
+            return;
+        }
+
+        int localPlayerId = lockstep.LocalClientId;
+        if (currentResolvedTarget != null)
+        {
+            PlayerController currentPlayer =
+                currentResolvedTarget.GetComponent<PlayerController>();
+
+            if (currentPlayer != null &&
+                currentPlayer.Entity != null &&
+                currentPlayer.Entity.EntityId == localPlayerId)
+            {
+                return;
+            }
+        }
+
+        PlayerController[] players =
+            FindObjectsOfType<PlayerController>();
+
+        for (int i = 0; i < players.Length; i++)
+        {
+            PlayerController player = players[i];
+            if (player.Entity != null &&
+                player.Entity.EntityId == localPlayerId)
+            {
+                SetFollowTarget(player.transform);
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 外部也可以显式切换跟随目标。切换时会重置摄像机位置，
+    /// 避免从 Player1 平滑飞越整张地图到 Player2。
+    /// </summary>
+    public void SetFollowTarget(Transform target)
+    {
+        if (followTarget == target)
+        {
+            return;
+        }
+
+        followTarget = target;
+        currentResolvedTarget = target;
+        cameraInitialized = false;
+
+        if (target != null)
+        {
+            // 首次切换到本地角色时，让镜头默认站在角色背后，
+            // 而不是让 PlayerId=2 的客户端从 Player1 的方向看 Player2。
+            rotationY = target.eulerAngles.y;
+        }
+    }
+
+    private void OnLookPerformed(InputAction.CallbackContext context)
+    {
+        lookInput = context.ReadValue<Vector2>();
+    }
+
+    private void OnLookCanceled(InputAction.CallbackContext context)
+    {
+        lookInput = Vector2.zero;
+    }
+
+    private void OnValidate()
+    {
+        rotationSpeed = Mathf.Max(0.01f, rotationSpeed);
+        distance = Mathf.Max(0.1f, distance);
+        positionFollowSharpness =
+            Mathf.Max(0f, positionFollowSharpness);
+        minVerticalAngle =
+            Mathf.Min(minVerticalAngle, maxVerticalAngle);
     }
 }

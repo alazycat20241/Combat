@@ -59,10 +59,11 @@ Luban 加载后调用 `CombatConfigBundle.LinkAttacksByOwner()`，把扁平攻�
 
 ```text
 New Input System
-    -> PlayerController 翻译成 CombatInputFrame
-    -> CombatInputCommand(frame, entityId, input)
-    -> CombatWorld.SubmitInput()
-    -> CombatWorld.Step() 按 EntityId 排序推进
+    -> PlayerController 翻译成 FrameInputMask
+    -> LockstepManager 提交 C2G_SubmitFrameInput
+    -> 服务端收齐所有玩家并广播 G2C_FrameData
+    -> LockstepManager 深拷贝并缓存完整帧
+    -> CombatWorld.Tick(frameInputs) 按 EntityId 排序推进
     -> 帧结束后 DrainEvents() 获取 CombatEvent
     -> PlayerController 驱动 Animator
     -> PlayerController 平滑同步 Transform
@@ -74,6 +75,31 @@ New Input System
 输入命令绑定明确的 `Frame`，过期帧和同实体同帧重复输入会被拒绝。
 `CombatEvent` 包含 `Frame`、攻击者 EntityId、目标 EntityId 和伤害，并在
 `CombatWorld.Step()` 全部实体完成后统一派发。
+
+## 真实锁步网络
+
+`LockstepManager` 通过 `ILockstepNetwork` 接入真实 Fantasy/KCP 网络，
+Unity 侧由 `NetworkManager` 实现该接口：
+
+```text
+客户端每 50ms 采集本地输入
+→ C2G_SubmitFrameInput 提交当前输入流水线
+→ 服务端等待当前帧所有玩家输入
+→ G2C_FrameData 广播完整帧
+→ NetworkManager 事件回调同步深拷贝为纯 FrameInput
+→ 客户端只执行恰好等于 CurrentFrame 的完整帧
+→ 当前帧未到达时暂停 CombatWorld，等待下一帧
+```
+
+服务端当前只顺序推进当前帧，因此客户端首次发送会补齐
+`CurrentFrame ... CurrentFrame + InputLeadFrames` 的启动窗口，
+而不是直接跳到 `CurrentFrame + InputLeadFrames`。之后始终顺序发送并保留
+3 帧输入提前量。帧号错位、重复玩家或不完整输入都会停止推进或直接报错。
+
+客户端连接后先发送 `C2G_JoinLockstep`。服务端按加入顺序分配唯一的
+`PlayerId=1/2`，通过 `G2C_PlayerAssigned` 返回。客户端在收到身份前不发送帧输入，
+收到后调用 `Lockstep.SetLocalPlayerId()`，并且只让对应 EntityId 的
+`PlayerController` 读取本地键盘。
 
 Animator 根运动不参与运行时逻辑。攻击表通过以下字段加载离线烘焙数据：
 
