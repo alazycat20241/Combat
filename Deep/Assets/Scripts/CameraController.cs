@@ -18,7 +18,7 @@ public sealed class CameraController : MonoBehaviour
     [Header("轨道参数")]
     [SerializeField, Min(0.01f)] private float rotationSpeed = 0.2f;
     [SerializeField, Min(0.1f)] private float distance = 5f;
-    [SerializeField, Min(0f)] private float positionFollowSharpness = 30f;
+    [SerializeField, Min(0f)] private float positionFollowSharpness = 60f;
     [SerializeField] private float minVerticalAngle = -45f;
     [SerializeField] private float maxVerticalAngle = 45f;
     [SerializeField] private Vector2 framingOffset;

@@ -39,7 +39,22 @@ namespace Hotfix.Lockstep
         /// 这可以吸收“客户端采集定时器”和“服务端广播定时器”的相位差，
         /// 同时防止恶意客户端一次提交超大帧号，导致输入字典无限增长。
         /// </summary>
-        private const int MaxFutureFrameLead = 3;
+        // 客户端开启预测后会领先服务端若干帧发送输入。
+        // 保留足够的输入窗口，避免正常网络延迟触发“未来帧”拒绝。
+        private const int MaxFutureFrameLead = 64;
+        private const int HashRetentionFrames = 64;
+
+        private readonly struct LockstepInput
+        {
+            public readonly int InputMask;
+            public readonly int TargetEntityId;
+
+            public LockstepInput(int inputMask, int targetEntityId)
+            {
+                InputMask = inputMask;
+                TargetEntityId = targetEntityId;
+            }
+        }
 
         private static readonly object InstanceLock = new object();
         private static readonly Dictionary<long, LockstepRoomSystem> Rooms =
@@ -51,8 +66,16 @@ namespace Hotfix.Lockstep
         /// <summary>
         /// 用户要求的锁步输入结构：帧号 -> (玩家 ID -> 输入掩码)。
         /// </summary>
-        private readonly Dictionary<int, Dictionary<int, int>> frameInputs =
-            new Dictionary<int, Dictionary<int, int>>();
+        private readonly Dictionary<int, Dictionary<int, LockstepInput>>
+            frameInputs =
+                new Dictionary<int, Dictionary<int, LockstepInput>>();
+
+        /// <summary>
+        /// 帧号 -> (PlayerId -> WorldHash)。
+        /// 同一帧收齐所有玩家后立即比较并移除，避免持续占用内存。
+        /// </summary>
+        private readonly Dictionary<int, Dictionary<int, ulong>> frameHashes =
+            new Dictionary<int, Dictionary<int, ulong>>();
 
         /// <summary>
         /// 玩家 ID -> Session。
@@ -166,6 +189,7 @@ namespace Hotfix.Lockstep
             Session session,
             int frameId,
             int inputMask,
+            int targetEntityId,
             int expectedPlayerCount = DefaultExpectedPlayerCount)
         {
             if (session == null || session.IsDisposed || session.Scene == null)
@@ -174,7 +198,33 @@ namespace Hotfix.Lockstep
             }
 
             return GetOrCreate(session.Scene, expectedPlayerCount)
-                .SubmitInput(session, frameId, inputMask);
+                .SubmitInput(
+                    session,
+                    frameId,
+                    inputMask,
+                    targetEntityId);
+        }
+
+        /// <summary>
+        /// 接收客户端执行完某帧后上报的 WorldHash。
+        /// Session -> PlayerId 由服务端绑定，客户端不能伪造玩家身份。
+        /// </summary>
+        public static bool SubmitFrameHash(
+            Session session,
+            int frameId,
+            ulong worldHash,
+            int expectedPlayerCount = DefaultExpectedPlayerCount)
+        {
+            if (session == null ||
+                session.IsDisposed ||
+                session.Scene == null ||
+                frameId <= 0)
+            {
+                return false;
+            }
+
+            return GetOrCreate(session.Scene, expectedPlayerCount)
+                .SubmitHash(session, frameId, worldHash);
         }
 
         /// <summary>
@@ -304,6 +354,7 @@ namespace Hotfix.Lockstep
                 sessionsByPlayerId.Remove(playerId);
                 playerIdsBySessionId.Remove(session.Id);
                 RemovePlayerInputsLocked(playerId);
+                RemovePlayerHashesLocked(playerId);
                 return true;
             }
         }
@@ -344,6 +395,7 @@ namespace Hotfix.Lockstep
                 idToRemove = timerId;
                 timerId = 0;
                 frameInputs.Clear();
+                frameHashes.Clear();
                 sessionsByPlayerId.Clear();
                 playerIdsBySessionId.Clear();
             }
@@ -391,12 +443,13 @@ namespace Hotfix.Lockstep
         private void Tick()
         {
             List<Session>? recipients = null;
-            List<KeyValuePair<int, int>>? orderedInputs = null;
+            List<KeyValuePair<int, LockstepInput>>? orderedInputs = null;
             int committedFrame = 0;
 
             lock (syncRoot)
             {
                 PruneDisconnectedSessionsLocked();
+                PruneOldFrameHashesLocked();
 
                 if (TryTakeCompleteCurrentFrameLocked(
                         out committedFrame,
@@ -417,12 +470,13 @@ namespace Hotfix.Lockstep
                      inputIndex < orderedInputs.Count;
                      inputIndex++)
                 {
-                    KeyValuePair<int, int> input =
+                    KeyValuePair<int, LockstepInput> input =
                         orderedInputs[inputIndex];
                     Log.Info(
                         $"Broadcasting lockstep Frame={committedFrame}, " +
                         $"PlayerId={input.Key}, " +
-                        $"InputMask=0x{input.Value:X8}.");
+                        $"InputMask=0x{input.Value.InputMask:X8}, " +
+                        $"TargetEntityId={input.Value.TargetEntityId}.");
                 }
             }
 
@@ -443,10 +497,13 @@ namespace Hotfix.Lockstep
                      inputIndex < orderedInputs.Count;
                      inputIndex++)
                 {
-                    KeyValuePair<int, int> input = orderedInputs[inputIndex];
+                    KeyValuePair<int, LockstepInput> input =
+                        orderedInputs[inputIndex];
                     PlayerInputData playerInput = PlayerInputData.Create();
                     playerInput.playerId = input.Key;
-                    playerInput.inputMask = input.Value;
+                    playerInput.inputMask = input.Value.InputMask;
+                    playerInput.targetEntityId =
+                        input.Value.TargetEntityId;
                     frameData.inputs.Add(playerInput);
                 }
 
@@ -454,10 +511,120 @@ namespace Hotfix.Lockstep
             }
         }
 
+        private bool SubmitHash(
+            Session session,
+            int frameId,
+            ulong worldHash)
+        {
+            lock (syncRoot)
+            {
+                if (stopped || session.IsDisposed)
+                {
+                    return false;
+                }
+
+                PruneDisconnectedSessionsLocked();
+                PruneOldFrameHashesLocked();
+
+                if (!playerIdsBySessionId.TryGetValue(
+                        session.Id,
+                        out int playerId))
+                {
+                    Log.Warning(
+                        $"Rejected hash from unjoined SessionId={session.Id}, " +
+                        $"Frame={frameId}.");
+                    return false;
+                }
+
+                if ((long)frameId + HashRetentionFrames < currentFrame)
+                {
+                    Log.Warning(
+                        $"Rejected expired frame hash. Frame={frameId}, " +
+                        $"CurrentFrame={currentFrame}, " +
+                        $"PlayerId={playerId}.");
+                    return false;
+                }
+
+                if (frameId > currentFrame + MaxFutureFrameLead)
+                {
+                    Log.Warning(
+                        $"Rejected future frame hash. Frame={frameId}, " +
+                        $"CurrentFrame={currentFrame}, " +
+                        $"PlayerId={playerId}.");
+                    return false;
+                }
+
+                if (!frameHashes.TryGetValue(
+                        frameId,
+                        out Dictionary<int, ulong>? playerHashes) ||
+                    playerHashes == null)
+                {
+                    playerHashes = new Dictionary<int, ulong>(
+                        expectedPlayerCount);
+                    frameHashes.Add(frameId, playerHashes);
+                }
+
+                if (playerHashes.TryGetValue(
+                        playerId,
+                        out ulong existingHash))
+                {
+                    if (existingHash == worldHash)
+                    {
+                        return true;
+                    }
+
+                    Log.Error(
+                        $"Player {playerId} submitted conflicting hashes for " +
+                        $"Frame={frameId}: {existingHash} != {worldHash}.");
+                    return false;
+                }
+
+                playerHashes.Add(playerId, worldHash);
+
+                foreach (int activePlayerId in sessionsByPlayerId.Keys)
+                {
+                    if (!playerHashes.ContainsKey(activePlayerId))
+                    {
+                        return true;
+                    }
+                }
+
+                if (playerHashes.Count != expectedPlayerCount)
+                {
+                    return true;
+                }
+
+                playerHashes.TryGetValue(1, out ulong player1Hash);
+                playerHashes.TryGetValue(2, out ulong player2Hash);
+
+                if (player1Hash != player2Hash)
+                {
+                    // Error 级别会由 NLog 标记为 [ERROR]（控制台规则中为红色）。
+                    // 额外使用横幅和大量感叹号，确保日志文件中也非常醒目。
+                    Log.Error(
+                        "\n" +
+                        "!!!!!!!!!!!!!!!! DESYNC DETECTED !!!!!!!!!!!!!!!!\n" +
+                        $"[Desync] Frame={frameId}, " +
+                        $"Player1={player1Hash}, Player2={player2Hash}\n" +
+                        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                }
+                else
+                {
+                    Log.Debug(
+                        $"[HashOK] Frame={frameId}, Hash={player1Hash}");
+                }
+
+                // 该帧已经完成裁判，移除待比对数据，避免重复告警和内存增长。
+                frameHashes.Remove(frameId);
+                return true;
+            }
+        }
+
         private bool SubmitInput(
             Session session,
             int frameId,
-            int inputMask)
+            int inputMask,
+            int targetEntityId)
         {
             lock (syncRoot)
             {
@@ -501,29 +668,37 @@ namespace Hotfix.Lockstep
 
                 if (!frameInputs.TryGetValue(
                         frameId,
-                        out Dictionary<int, int>? players) ||
+                        out Dictionary<int, LockstepInput>? players) ||
                     players == null)
                 {
-                    players = new Dictionary<int, int>(
+                    players = new Dictionary<int, LockstepInput>(
                         expectedPlayerCount);
                     frameInputs.Add(frameId, players);
                 }
 
-                if (players.TryGetValue(playerId, out int existingMask))
+                LockstepInput input = new LockstepInput(
+                    inputMask,
+                    targetEntityId);
+
+                if (players.TryGetValue(
+                        playerId,
+                        out LockstepInput existingInput))
                 {
                     // KCP 虽然可靠，但应用层去重仍然保留。
-                    // 相同输入视为幂等成功，不同输入则拒绝，避免后包覆盖前包。
-                    return existingMask == inputMask;
+                    // Mask 或 TargetId 不同都视为冲突，避免后包覆盖前包。
+                    return existingInput.InputMask == inputMask &&
+                           existingInput.TargetEntityId == targetEntityId;
                 }
 
-                players.Add(playerId, inputMask);
+                players.Add(playerId, input);
 
                 if (frameId <= 8)
                 {
                     Log.Info(
                         $"Accepted lockstep input Frame={frameId}, " +
                         $"PlayerId={playerId}, " +
-                        $"InputMask=0x{inputMask:X8}.");
+                        $"InputMask=0x{inputMask:X8}, " +
+                        $"TargetEntityId={targetEntityId}.");
                 }
 
                 return true;
@@ -580,6 +755,7 @@ namespace Hotfix.Lockstep
 
             currentFrame = 1;
             frameInputs.Clear();
+            frameHashes.Clear();
         }
 
         private void PruneDisconnectedSessionsLocked()
@@ -619,6 +795,7 @@ namespace Hotfix.Lockstep
                 }
 
                 RemovePlayerInputsLocked(playerId);
+                RemovePlayerHashesLocked(playerId);
 
                 Log.Info(
                     $"Removed disconnected lockstep PlayerId={playerId} " +
@@ -632,7 +809,8 @@ namespace Hotfix.Lockstep
 
             foreach (KeyValuePair<
                          int,
-                         Dictionary<int, int>> framePair in frameInputs)
+                         Dictionary<int, LockstepInput>> framePair
+                     in frameInputs)
             {
                 framePair.Value.Remove(playerId);
 
@@ -654,9 +832,69 @@ namespace Hotfix.Lockstep
             }
         }
 
+        private void RemovePlayerHashesLocked(int playerId)
+        {
+            List<int>? emptyFrames = null;
+
+            foreach (KeyValuePair<
+                         int,
+                         Dictionary<int, ulong>> framePair in frameHashes)
+            {
+                framePair.Value.Remove(playerId);
+
+                if (framePair.Value.Count == 0)
+                {
+                    emptyFrames ??= new List<int>();
+                    emptyFrames.Add(framePair.Key);
+                }
+            }
+
+            if (emptyFrames == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < emptyFrames.Count; i++)
+            {
+                frameHashes.Remove(emptyFrames[i]);
+            }
+        }
+
+        private void PruneOldFrameHashesLocked()
+        {
+            int oldestRetainedFrame =
+                currentFrame - HashRetentionFrames;
+            if (oldestRetainedFrame <= 0 ||
+                frameHashes.Count == 0)
+            {
+                return;
+            }
+
+            List<int>? expiredFrames = null;
+
+            foreach (int frameId in frameHashes.Keys)
+            {
+                if (frameId < oldestRetainedFrame)
+                {
+                    expiredFrames ??= new List<int>();
+                    expiredFrames.Add(frameId);
+                }
+            }
+
+            if (expiredFrames == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < expiredFrames.Count; i++)
+            {
+                frameHashes.Remove(expiredFrames[i]);
+            }
+        }
+
         private bool TryTakeCompleteCurrentFrameLocked(
             out int frameId,
-            out List<KeyValuePair<int, int>>? orderedInputs)
+            out List<KeyValuePair<int, LockstepInput>>? orderedInputs)
         {
             frameId = currentFrame;
             orderedInputs = null;
@@ -668,7 +906,7 @@ namespace Hotfix.Lockstep
 
             if (!frameInputs.TryGetValue(
                     currentFrame,
-                    out Dictionary<int, int>? players) ||
+                    out Dictionary<int, LockstepInput>? players) ||
                 players == null)
             {
                 return false;
@@ -682,10 +920,10 @@ namespace Hotfix.Lockstep
                 }
             }
 
-            orderedInputs = new List<KeyValuePair<int, int>>(
+            orderedInputs = new List<KeyValuePair<int, LockstepInput>>(
                 players.Count);
 
-            foreach (KeyValuePair<int, int> pair in players)
+            foreach (KeyValuePair<int, LockstepInput> pair in players)
             {
                 orderedInputs.Add(pair);
             }
@@ -745,12 +983,39 @@ namespace Hotfix.Lockstep
             if (!LockstepRoomSystem.SubmitFrameInput(
                     session,
                     message.frameId,
-                    message.inputMask))
+                    message.inputMask,
+                    message.targetEntityId))
             {
                 Log.Warning(
                     $"Invalid lockstep input rejected. " +
                     $"SessionId={session.Id}, " +
                     $"Frame={message.frameId}.");
+            }
+
+            await FTask.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// 接收客户端确认帧的 WorldHash，并交由房间裁判比对。
+    /// </summary>
+    public sealed class C2G_FrameHashHandler
+        : Message<C2G_FrameHash>
+    {
+        protected override async FTask Run(
+            Session session,
+            C2G_FrameHash message)
+        {
+            if (!LockstepRoomSystem.SubmitFrameHash(
+                    session,
+                    message.frameId,
+                    message.worldHash))
+            {
+                Log.Warning(
+                    $"Invalid frame hash rejected. " +
+                    $"SessionId={session.Id}, " +
+                    $"Frame={message.frameId}, " +
+                    $"Hash={message.worldHash}.");
             }
 
             await FTask.CompletedTask;

@@ -48,12 +48,22 @@ public sealed class CombatSimulationRunner : MonoBehaviour
         }
 
         instance = this;
-        Lockstep ??= new LockstepManager(Fix64.FromDecimal(0.05m), 3);
+        // 本地/局域网联机使用 1 帧输入提前量即可。
+        // 3 帧提前量会额外制造约 150ms 的固定操作延迟。
+        Lockstep ??= new LockstepManager(Fix64.FromDecimal(0.05m), 128);
         TryBindNetwork();
     }
 
     private void OnEnable()
     {
+        if (Lockstep != null)
+        {
+            Lockstep.WorldHashCalculated -= OnWorldHashCalculated;
+            Lockstep.WorldHashCalculated += OnWorldHashCalculated;
+            Lockstep.RollbackCompleted -= OnRollbackCompleted;
+            Lockstep.RollbackCompleted += OnRollbackCompleted;
+        }
+
         // Runner 在场景加载前创建，此时 NetworkManager 可能还不存在。
         // 这里先尝试一次；若仍为空，Update 会继续尝试绑定。
         TryBindNetwork();
@@ -61,6 +71,12 @@ public sealed class CombatSimulationRunner : MonoBehaviour
 
     private void OnDisable()
     {
+        if (Lockstep != null)
+        {
+            Lockstep.WorldHashCalculated -= OnWorldHashCalculated;
+            Lockstep.RollbackCompleted -= OnRollbackCompleted;
+        }
+
         if (subscribedNetworkManager != null)
         {
             subscribedNetworkManager.OnFrameDataReceived -=
@@ -69,6 +85,28 @@ public sealed class CombatSimulationRunner : MonoBehaviour
                 OnPlayerIdAssigned;
             subscribedNetworkManager = null;
         }
+    }
+
+    private void OnWorldHashCalculated(long frameId, ulong worldHash)
+    {
+        Debug.Log($"[Hash] Frame: {frameId}, Hash: {worldHash}");
+    }
+
+    /// <summary>
+    /// 重演期间 CombatWorld 已丢弃动画事件，且不会逐历史帧写 Transform。
+    /// 重演完成后只在这里把所有表现层一次性贴到最新逻辑状态。
+    /// </summary>
+    private void OnRollbackCompleted(long frameId)
+    {
+        PlayerController[] players =
+            FindObjectsOfType<PlayerController>();
+
+        for (int i = 0; i < players.Length; i++)
+        {
+            players[i].HandleRollbackVisual(frameId);
+        }
+
+        Debug.Log($"[Rollback] Completed at Frame={frameId}.");
     }
 
     private void Update()
@@ -279,7 +317,8 @@ public sealed class CombatSimulationRunner : MonoBehaviour
             copiedInputs[i] = new FrameInput(
                 message.frameId,
                 input.playerId,
-                (FrameInputMask)(uint)input.inputMask);
+                (FrameInputMask)(uint)input.inputMask,
+                input.targetEntityId);
         }
 
         Lockstep.EnqueueFrameData(message.frameId, copiedInputs);

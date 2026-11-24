@@ -244,7 +244,10 @@ namespace Game.Networking
         /// frameId 必须使用服务端当前等待的锁定帧号；inputMask 由客户端输入层生成。
         /// 消息创建后交给 Fantasy 的发送通道管理，发送完成或发送失败时会自动回收。
         /// </summary>
-        public void SendFrameInput(int frameId, int inputMask)
+        public void SendFrameInput(
+            int frameId,
+            int inputMask,
+            int targetEntityId = 0)
         {
             if (frameId <= 0)
             {
@@ -257,6 +260,7 @@ namespace Game.Networking
                 C2G_SubmitFrameInput.Create();
             message.frameId = frameId;
             message.inputMask = inputMask;
+            message.targetEntityId = targetEntityId;
             Send(message);
         }
 
@@ -266,7 +270,8 @@ namespace Game.Networking
         /// </summary>
         public bool TrySendFrameInput(
             int frameId,
-            FrameInputMask inputMask)
+            FrameInputMask inputMask,
+            int targetEntityId)
         {
             if (frameId <= 0 || !IsConnected)
             {
@@ -277,9 +282,27 @@ namespace Game.Networking
                 C2G_SubmitFrameInput.Create();
             message.frameId = frameId;
             message.inputMask = (int)(uint)inputMask;
+            message.targetEntityId = targetEntityId;
 
             // Send 内部会再次检查连接状态；如果恰好在这期间断线，
             // 它会 Dispose 消息并返回 false，LockstepManager 会保留该帧号重试。
+            return Send(message);
+        }
+
+        /// <summary>
+        /// 向服务端上报某个已执行确认帧的 WorldHash。
+        /// 返回 false 表示消息没有进入发送通道，不影响本地逻辑继续执行。
+        /// </summary>
+        public bool TrySendFrameHash(int frameId, ulong worldHash)
+        {
+            if (frameId <= 0 || !IsConnected)
+            {
+                return false;
+            }
+
+            C2G_FrameHash message = C2G_FrameHash.Create();
+            message.frameId = frameId;
+            message.worldHash = worldHash;
             return Send(message);
         }
 

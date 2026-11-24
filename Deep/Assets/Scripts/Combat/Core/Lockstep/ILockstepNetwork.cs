@@ -18,6 +18,15 @@ namespace Combat.Core
         /// 尝试发送一个逻辑帧的本地玩家输入。
         /// 返回 false 表示网络未连接或消息没有成功进入发送通道。
         /// </summary>
-        bool TrySendFrameInput(int frameId, FrameInputMask inputMask);
+        bool TrySendFrameInput(
+            int frameId,
+            FrameInputMask inputMask,
+            int targetEntityId);
+
+        /// <summary>
+        /// 上报本地执行完成帧的 WorldHash。
+        /// 服务端使用两份同帧 Hash 判断客户端逻辑是否已经分叉。
+        /// </summary>
+        bool TrySendFrameHash(int frameId, ulong worldHash);
     }
 }

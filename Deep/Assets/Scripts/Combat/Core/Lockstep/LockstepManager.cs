@@ -4,121 +4,158 @@ using System.Collections.Generic;
 namespace Combat.Core
 {
     /// <summary>
-    /// 真实网络驱动的锁步总管理器。
+    /// 客户端预测 + 服务端确认校正 + 历史重演的锁步管理器。
     ///
-    /// 它不负责读取 Unity Input，也不直接依赖 MonoBehaviour：
-    /// 1. PlayerController 在 FixedUpdate 中把本地输入暂存到 SubmitLocalInput。
-    /// 2. 本类通过 ILockstepNetwork 把输入提交给服务端。
-    /// 3. Unity 网络适配层把 G2C_FrameData 深拷贝成纯 FrameData 后调用
-    ///    EnqueueFrameData。
-    /// 4. 只有当前需要执行的完整帧已经进入本地帧队列时，CombatWorld 才允许 Tick。
-    /// 5. 缺少当前帧时直接等待，绝不使用本地输入“猜”一整帧继续运行。
-    ///
-    /// 这种“逻辑只读已确认帧”的约束，是后续客户端预测和回滚能够正确工作的基础。
+    /// 时间线：
+    /// 1. 服务端确认首帧后，客户端不再等待每一帧的网络往返。
+    /// 2. 每个 FixedUpdate 立即预测下一帧。
+    /// 3. 已确认帧到达后与预测输入对比。
+    /// 4. 首个不一致帧从 Snapshot 恢复，并重演到当前预测时间。
     /// </summary>
     public sealed class LockstepManager
     {
-        /// <summary>
-        /// 仅用于启动阶段补齐输入流水线时，重复携带移动键。
-        ///
-        /// 攻击和终极技是“按下一次”的边沿输入，不能在补齐未来的帧时重复发送，
-        /// 否则一个左键可能被服务端回放成多次攻击。
-        /// </summary>
         private const FrameInputMask ContinuousInputMask =
             FrameInputMask.MoveForward |
             FrameInputMask.MoveBackward |
             FrameInputMask.MoveLeft |
             FrameInputMask.MoveRight;
 
-        /// <summary>
-        /// 按下一次的边沿输入。
-        /// 网络等待期间必须累积，发送成功后才能清除。
-        /// </summary>
         private const FrameInputMask TriggerInputMask =
             FrameInputMask.PrimaryAttack |
             FrameInputMask.SecondaryAttack |
             FrameInputMask.Jump;
 
+        private const int DefaultPredictionBufferFrames = 128;
+        private const int MaxPredictionAheadFrames = 8;
+
+        private sealed class PredictionFrame
+        {
+            public long Frame;
+            public CombatWorld.Snapshot SnapshotBefore;
+            public Dictionary<int, CombatInputFrame> Inputs;
+            public ulong PredictedHash;
+            public bool Valid;
+        }
+
+        private readonly struct CombatEventKey :
+            IEquatable<CombatEventKey>
+        {
+            private readonly long frame;
+            private readonly CombatEventType type;
+            private readonly int sourceEntityId;
+            private readonly int targetEntityId;
+            private readonly AttackState attackState;
+
+            public CombatEventKey(CombatEvent combatEvent)
+            {
+                frame = combatEvent.Frame;
+                type = combatEvent.Type;
+                sourceEntityId = combatEvent.SourceEntityId;
+                targetEntityId = combatEvent.TargetEntityId;
+                attackState = combatEvent.AttackState;
+            }
+
+            public bool Equals(CombatEventKey other)
+            {
+                return frame == other.frame &&
+                       type == other.type &&
+                       sourceEntityId == other.sourceEntityId &&
+                       targetEntityId == other.targetEntityId &&
+                       attackState == other.attackState;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is CombatEventKey other &&
+                       Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hash = (int)frame;
+                    hash = (hash * 397) ^ (int)type;
+                    hash = (hash * 397) ^ sourceEntityId;
+                    hash = (hash * 397) ^ targetEntityId;
+                    hash = (hash * 397) ^ (int)attackState;
+                    return hash;
+                }
+            }
+        }
+
         private readonly object incomingFrameLock = new object();
         private readonly CombatWorld world;
         private readonly List<int> playerIds = new List<int>(4);
-
-        /// <summary>
-        /// 每个玩家最新采集到、但还没塞进待发送输入帧的掩码。
-        /// PlayerController 提交后，LockstepManager 在 FixedUpdate 中消费它。
-        /// </summary>
         private readonly Dictionary<int, FrameInputMask> pendingInputMasks =
             new Dictionary<int, FrameInputMask>();
-
         private readonly Dictionary<int, int> preferredTargets =
             new Dictionary<int, int>();
-
-        /// <summary>
-        /// 服务端已经确认并广播的完整帧。
-        ///
-        /// 使用 SortedDictionary 而不是直接保存 G2C_FrameData：
-        /// Fantasy 会在 Handler 返回后回收网络消息，所以这里保存的必须是
-        /// 完全脱离消息对象和池化生命周期的内部纯数据帧。
-        /// </summary>
+        private readonly Dictionary<int, CombatInputFrame> lastKnownInputs =
+            new Dictionary<int, CombatInputFrame>();
         private readonly SortedDictionary<long, FrameData> incomingFrames =
             new SortedDictionary<long, FrameData>();
-
+        private readonly PredictionFrame[] predictionBuffer;
         private readonly List<CombatEvent> committedEvents =
             new List<CombatEvent>(16);
+        private readonly List<CombatEvent> discardedReplayEvents =
+            new List<CombatEvent>(32);
+        private readonly HashSet<CombatEventKey> emittedCombatEvents =
+            new HashSet<CombatEventKey>();
 
         private ILockstepNetwork network;
-        private readonly int inputLeadFrames;
-
-        /// <summary>
-        /// 下一个尚未发送给服务端的输入帧号。
-        ///
-        /// 它通常领先 CurrentFrame 若干帧，但不能跳过中间帧。
-        /// 服务端的锁步房间只推进当前帧，因此 1、2、3 未收齐时直接发帧 4，
-        /// 会让服务端永远等不到帧 1，最终形成死锁。
-        /// </summary>
         private long nextInputFrameToSend = 1;
+        private long lastConfirmedFrame;
+        private bool predictionStarted;
         private bool hasServerAssignedPlayerId;
 
         public LockstepManager(
             Fix64 fixedDeltaTime,
-            int inputLeadFrames = 3)
+            int predictionBufferFrames =
+                DefaultPredictionBufferFrames)
         {
-            if (inputLeadFrames < 0)
+            if (predictionBufferFrames < 4)
             {
                 throw new ArgumentOutOfRangeException(
-                    nameof(inputLeadFrames));
+                    nameof(predictionBufferFrames),
+                    "Prediction buffer must contain at least 4 frames.");
             }
 
             world = new CombatWorld(fixedDeltaTime);
-            this.inputLeadFrames = inputLeadFrames;
+            predictionBuffer =
+                new PredictionFrame[predictionBufferFrames];
         }
 
         public CombatWorld World => world;
         public ILockstepNetwork Network => network;
+        public event Action<long, ulong> WorldHashCalculated;
 
         /// <summary>
-        /// 当前等待执行、也是 CombatWorld 下一逻辑帧的帧号。
+        /// 回滚重演完成时触发一次。表现层应在这时把 Transform
+        /// 直接吸附到最新逻辑状态，而不是逐历史帧播放动画。
         /// </summary>
+        public event Action<long> RollbackCompleted;
+
+        public ulong CurrentWorldHash { get; private set; }
         public long CurrentFrame => world.NextFrame;
 
         /// <summary>
-        /// 最近成功执行并确认的帧号。
+        /// 当前客户端逻辑时间线最后预测到的帧。
         /// </summary>
         public long LastCompletedFrame => world.Frame;
 
         /// <summary>
-        /// 下一个准备发送的输入帧号，便于调试网络流水线。
+        /// 最近一帧服务端确认帧。
         /// </summary>
-        public long NextInputFrameToSend => nextInputFrameToSend;
+        public long LastConfirmedFrame => lastConfirmedFrame;
 
+        public long NextInputFrameToSend => nextInputFrameToSend;
         public int LocalClientId { get; private set; }
         public bool HasServerAssignedPlayerId =>
             hasServerAssignedPlayerId;
+        public bool PredictionStarted => predictionStarted;
         public IReadOnlyList<int> PlayerIds => playerIds;
 
-        /// <summary>
-        /// 当前缓存了多少个尚未执行的服务端完整帧。
-        /// </summary>
         public int PendingFrameCount
         {
             get
@@ -130,12 +167,6 @@ namespace Combat.Core
             }
         }
 
-        /// <summary>
-        /// 注入真实网络实现。
-        ///
-        /// CombatSimulationRunner 在 NetworkManager 创建完成后调用。
-        /// 纯逻辑程序集因此只认识 ILockstepNetwork，不认识 Unity NetworkManager。
-        /// </summary>
         public void SetNetwork(ILockstepNetwork network)
         {
             this.network = network ??
@@ -165,10 +196,8 @@ namespace Combat.Core
             playerIds.Sort();
             pendingInputMasks[playerId] = FrameInputMask.None;
             preferredTargets[playerId] = 0;
+            lastKnownInputs[playerId] = default;
 
-            // 第一个注册实体只作为尚未收到服务端身份时的本地引用。
-            // 在 SetLocalPlayerId 被调用前，本类不会发送任何帧输入，
-            // 因此不会把临时槽位误当成服务端分配的联机身份。
             if (LocalClientId == 0)
             {
                 LocalClientId = playerId;
@@ -186,19 +215,18 @@ namespace Combat.Core
             playerIds.Remove(playerId);
             pendingInputMasks.Remove(playerId);
             preferredTargets.Remove(playerId);
+            lastKnownInputs.Remove(playerId);
 
             if (LocalClientId == playerId)
             {
-                LocalClientId = playerIds.Count > 0 ? playerIds[0] : 0;
+                LocalClientId = playerIds.Count > 0
+                    ? playerIds[0]
+                    : 0;
                 hasServerAssignedPlayerId = false;
+                predictionStarted = false;
             }
         }
 
-        /// <summary>
-        /// 显式指定本客户端的玩家 ID。
-        /// CombatSimulationRunner 会使用 G2C_PlayerAssigned 下发的 PlayerId
-        /// 调用本方法，而不是使用客户端自增的 runtimeEntityId。
-        /// </summary>
         public void SetLocalPlayerId(int playerId)
         {
             if (!playerIds.Contains(playerId))
@@ -209,22 +237,6 @@ namespace Combat.Core
 
             LocalClientId = playerId;
             hasServerAssignedPlayerId = true;
-
-            // 切换本地槽位时清除尚未发送的旧角色输入，
-            // 防止把切换前缓存的攻击误发给新身份。
-            for (int i = 0; i < playerIds.Count; i++)
-            {
-                pendingInputMasks[playerIds[i]] = FrameInputMask.None;
-            }
-        }
-
-        /// <summary>
-        /// 断线时撤销服务端身份授权。
-        /// 重连后必须重新收到 G2C_PlayerAssigned，客户端才会再次发送输入。
-        /// </summary>
-        public void ClearServerAssignedPlayerId()
-        {
-            hasServerAssignedPlayerId = false;
             nextInputFrameToSend = CurrentFrame;
 
             for (int i = 0; i < playerIds.Count; i++)
@@ -233,11 +245,21 @@ namespace Combat.Core
             }
         }
 
-        /// <summary>
-        /// PlayerController 每个 Unity FixedUpdate 调用一次。
-        /// 这里只保存输入，不立即发包，也不推进战斗世界。
-        /// </summary>
-        public void SubmitLocalInput(int playerId, FrameInputMask inputMask)
+        public void ClearServerAssignedPlayerId()
+        {
+            hasServerAssignedPlayerId = false;
+            predictionStarted = false;
+            nextInputFrameToSend = CurrentFrame;
+
+            for (int i = 0; i < playerIds.Count; i++)
+            {
+                pendingInputMasks[playerIds[i]] = FrameInputMask.None;
+            }
+        }
+
+        public void SubmitLocalInput(
+            int playerId,
+            FrameInputMask inputMask)
         {
             if (!pendingInputMasks.ContainsKey(playerId))
             {
@@ -252,16 +274,15 @@ namespace Combat.Core
             }
 
             FrameInputMask pending = pendingInputMasks[playerId];
-
-            // 移动是持续状态：用最新采样覆盖旧方向。
-            // 攻击/跳跃是边沿状态：与尚未发送的旧按键取并集，避免等待帧期间丢键。
             pendingInputMasks[playerId] =
                 (inputMask & ContinuousInputMask) |
                 (pending & TriggerInputMask) |
                 (inputMask & TriggerInputMask);
         }
 
-        public void SetPreferredTarget(int playerId, int targetPlayerId)
+        public void SetPreferredTarget(
+            int playerId,
+            int targetPlayerId)
         {
             if (!pendingInputMasks.ContainsKey(playerId))
             {
@@ -272,12 +293,6 @@ namespace Combat.Core
             preferredTargets[playerId] = targetPlayerId;
         }
 
-        /// <summary>
-        /// 接收 Unity 网络层已经深拷贝过的纯数据帧。
-        ///
-        /// 即使调用方已经复制一次，这里仍再次 Clone，确保 LockstepManager
-        /// 的队列不会和网络消息池、临时数组发生任何引用共享。
-        /// </summary>
         public void EnqueueFrameData(int frameId, FrameInput[] inputs)
         {
             if (frameId <= 0)
@@ -296,8 +311,6 @@ namespace Combat.Core
 
             lock (incomingFrameLock)
             {
-                // 同一帧重复到达时保留第一份。后续若要做多路冗余传输，
-                // 可以在这里比较两份输入并记录不一致，而不是直接覆盖。
                 if (!incomingFrames.ContainsKey(frameData.Frame))
                 {
                     incomingFrames.Add(frameData.Frame, frameData);
@@ -306,20 +319,66 @@ namespace Combat.Core
         }
 
         /// <summary>
-        /// 每个 20Hz 逻辑循环调用一次。
+        /// 每个 FixedUpdate 调用。
         ///
-        /// 步骤：
-        /// 1. 先消费所有“当前帧已经到达”的完整网络帧，让 CombatWorld 追上服务端。
-        /// 2. 再采集本机 PlayerController 刚提交的输入。
-        /// 3. 把输入顺序提交到服务端，维持 CurrentFrame + inputLeadFrames 的流水线。
-        ///
-        /// 如果当前帧尚未到达，第一步不会执行任何 CombatWorld.Tick；
-        /// 表现层因此会停留在上一帧逻辑结果，也就是“等待网络”。
+        /// 先使用服务端确认输入修正历史，再生成下一预测帧。
+        /// 首帧确认前不预测，避免第二名玩家尚未加入时时间线无限领先。
         /// </summary>
         public void AdvanceFixedFrame()
         {
-            ExecuteAvailableConfirmedFrames();
-            SubmitInputAndMaintainLead();
+            ReconcileConfirmedFrames();
+
+            if (!hasServerAssignedPlayerId ||
+                network == null ||
+                !network.IsConnected)
+            {
+                return;
+            }
+
+            if (!predictionStarted)
+            {
+                SendBootstrapInput();
+                return;
+            }
+
+            // 服务端确认暂停时，客户端最多领先 8 帧。
+            // 缺失这个上限会让预测时间线无限向前，最终与服务端帧号彻底脱节。
+            if (lastConfirmedFrame > 0 &&
+                world.Frame >=
+                lastConfirmedFrame + MaxPredictionAheadFrames)
+            {
+                return;
+            }
+
+            PredictNextFrame();
+        }
+
+        private void SendBootstrapInput()
+        {
+            long frameId = nextInputFrameToSend;
+            if (frameId != CurrentFrame || frameId > int.MaxValue)
+            {
+                return;
+            }
+
+            pendingInputMasks.TryGetValue(
+                LocalClientId,
+                out FrameInputMask localMask);
+            preferredTargets.TryGetValue(
+                LocalClientId,
+                out int targetEntityId);
+
+            if (!network.TrySendFrameInput(
+                    (int)frameId,
+                    localMask,
+                    targetEntityId))
+            {
+                return;
+            }
+
+            nextInputFrameToSend = frameId + 1;
+            pendingInputMasks[LocalClientId] =
+                localMask & ContinuousInputMask;
         }
 
         public void DrainEvents(List<CombatEvent> destination)
@@ -333,191 +392,497 @@ namespace Combat.Core
             committedEvents.Clear();
         }
 
-        private void SubmitInputAndMaintainLead()
+        private void PredictNextFrame()
         {
-            if (LocalClientId == 0 ||
-                !hasServerAssignedPlayerId)
-            {
-                return;
-            }
+            long frameId = world.Frame + 1;
+            CombatWorld.Snapshot snapshotBefore =
+                world.CaptureSnapshot();
 
+            Dictionary<int, CombatInputFrame> inputs =
+                BuildPredictedInputs(
+                    frameId,
+                    out FrameInputMask localMask,
+                    out int localTargetEntityId);
+
+            world.Tick(inputs);
+            ulong worldHash = world.CalculateWorldHash();
+
+            StorePrediction(new PredictionFrame
+            {
+                Frame = frameId,
+                SnapshotBefore = snapshotBefore,
+                Inputs = inputs,
+                PredictedHash = worldHash,
+                Valid = true
+            });
+
+            PublishHash(frameId, worldHash);
+            DrainPredictionEvents();
+            SendLocalInput(
+                frameId,
+                localMask,
+                localTargetEntityId);
+        }
+
+        private Dictionary<int, CombatInputFrame> BuildPredictedInputs(
+            long frameId,
+            out FrameInputMask localMask,
+            out int localTargetEntityId)
+        {
             pendingInputMasks.TryGetValue(
                 LocalClientId,
-                out FrameInputMask currentMask);
+                out localMask);
+            preferredTargets.TryGetValue(
+                LocalClientId,
+                out localTargetEntityId);
 
-            if (network == null || !network.IsConnected)
+            FrameInput localWireInput = new FrameInput(
+                frameId,
+                LocalClientId,
+                localMask,
+                localTargetEntityId);
+            CombatInputFrame localInput =
+                ToCombatInput(localWireInput);
+
+            Dictionary<int, CombatInputFrame> inputs =
+                new Dictionary<int, CombatInputFrame>(
+                    playerIds.Count);
+
+            for (int i = 0; i < playerIds.Count; i++)
             {
-                // 断线期间不无限缓存旧的攻击按键，避免重连后突然触发旧操作。
-                // 移动方向仍由 PlayerController 下一次 SubmitLocalInput 刷新。
-                pendingInputMasks[LocalClientId] =
-                    currentMask & ContinuousInputMask;
+                int playerId = playerIds[i];
+                if (playerId == LocalClientId)
+                {
+                    inputs.Add(playerId, localInput);
+                    continue;
+                }
+
+                lastKnownInputs.TryGetValue(
+                    playerId,
+                    out CombatInputFrame remoteInput);
+
+                // 远端没有新确认输入时，只延续移动方向。
+                // 攻击/跳跃是边沿输入，不能在未来预测帧中反复重复。
+                remoteInput.PrimaryAttackPressed = false;
+                remoteInput.SecondaryAttackPressed = false;
+                remoteInput.UltimatePressed = false;
+                inputs.Add(playerId, remoteInput);
+            }
+
+            lastKnownInputs[LocalClientId] = localInput;
+            pendingInputMasks[LocalClientId] =
+                localMask & ContinuousInputMask;
+            return inputs;
+        }
+
+        private void SendLocalInput(
+            long frameId,
+            FrameInputMask localMask,
+            int localTargetEntityId)
+        {
+            if (network == null ||
+                !network.IsConnected ||
+                frameId != nextInputFrameToSend ||
+                frameId > int.MaxValue)
+            {
                 return;
             }
 
-            // 服务端只能按顺序确认帧。若客户端已经因为重连或异常跳过了旧帧，
-            // 不再尝试发送服务端早已错过的帧号。
-            if (nextInputFrameToSend < CurrentFrame)
+            if (network.TrySendFrameInput(
+                    (int)frameId,
+                    localMask,
+                    localTargetEntityId))
             {
-                nextInputFrameToSend = CurrentFrame;
-            }
-
-            // 这是发送目标的上沿，而不是直接从这里开始发送。
-            // 例如 CurrentFrame=1、Lead=3 时，首次固定帧会发送 1、2、3、4，
-            // 其中 1 携带完整输入，2～4 只延续移动键作为启动填充。
-            //
-            // 如果第一包直接发 4，服务端会一直等待 1，帧 4 永远无法被确认。
-            long targetFrame = CurrentFrame + inputLeadFrames;
-            if (targetFrame > int.MaxValue)
-            {
-                targetFrame = int.MaxValue;
-            }
-
-            bool firstFrameInBatch = true;
-            bool sentAtLeastOneFrame = false;
-
-            while (nextInputFrameToSend <= targetFrame)
-            {
-                // 协议字段是 int32，不能让 long 帧号静默溢出。
-                if (nextInputFrameToSend > int.MaxValue)
-                {
-                    break;
-                }
-
-                FrameInputMask frameMask = firstFrameInBatch
-                    ? currentMask
-                    : currentMask & ContinuousInputMask;
-
-                bool sent = network.TrySendFrameInput(
-                    (int)nextInputFrameToSend,
-                    frameMask);
-
-                if (!sent)
-                {
-                    // 保留同一个待发送帧号，等网络恢复后从这里继续。
-                    break;
-                }
-
-                firstFrameInBatch = false;
-                sentAtLeastOneFrame = true;
-                nextInputFrameToSend++;
-            }
-
-            // 只有攻击/跳跃真正进入发送通道之后才消费。
-            // 如果当前帧窗口暂时不需要发送，边沿输入会保留到下一轮。
-            if (sentAtLeastOneFrame)
-            {
-                pendingInputMasks[LocalClientId] &=
-                    ContinuousInputMask;
+                nextInputFrameToSend = frameId + 1;
             }
         }
 
-        private void ExecuteAvailableConfirmedFrames()
+        private void ReconcileConfirmedFrames()
         {
-            // 网络可能一次送来多个已确认帧。全部按顺序消费，避免客户端永久落后。
-            while (TryDequeueFrame(CurrentFrame, out FrameData frameData))
+            List<FrameData> confirmations = TakeIncomingFrames();
+            if (confirmations == null || confirmations.Count == 0)
             {
-                ExecuteCommittedFrame(frameData);
+                return;
+            }
+
+            Dictionary<long, FrameData> confirmedByFrame =
+                new Dictionary<long, FrameData>(
+                    confirmations.Count);
+            long latestConfirmed = lastConfirmedFrame;
+            long earliestMismatch = long.MaxValue;
+
+            for (int i = 0; i < confirmations.Count; i++)
+            {
+                FrameData frameData = confirmations[i];
+                if (frameData.Frame <= 0)
+                {
+                    continue;
+                }
+
+                confirmedByFrame[frameData.Frame] = frameData;
+                latestConfirmed = Math.Max(
+                    latestConfirmed,
+                    frameData.Frame);
+
+                Dictionary<int, CombatInputFrame> actualInputs =
+                    ConvertConfirmedInputs(frameData);
+
+                if (TryGetPrediction(
+                        frameData.Frame,
+                        out PredictionFrame prediction))
+                {
+                    if (!InputsEqual(
+                            prediction.Inputs,
+                            actualInputs))
+                    {
+                        earliestMismatch = Math.Min(
+                            earliestMismatch,
+                            frameData.Frame);
+                    }
+                }
+                else
+                {
+                    earliestMismatch = Math.Min(
+                        earliestMismatch,
+                        frameData.Frame);
+                }
+            }
+
+            if (confirmedByFrame.Count == 0)
+            {
+                return;
+            }
+
+            if (!predictionStarted &&
+                earliestMismatch == long.MaxValue)
+            {
+                predictionStarted = true;
+            }
+
+            if (earliestMismatch == long.MaxValue)
+            {
+                ApplyMatchingConfirmations(confirmedByFrame);
+                lastConfirmedFrame = latestConfirmed;
+                predictionStarted = true;
+                return;
+            }
+
+            ReplayFromEarliestMismatch(
+                earliestMismatch,
+                latestConfirmed,
+                confirmedByFrame);
+            predictionStarted = true;
+        }
+
+        private void ApplyMatchingConfirmations(
+            Dictionary<long, FrameData> confirmedByFrame)
+        {
+            foreach (KeyValuePair<long, FrameData> pair
+                     in confirmedByFrame)
+            {
+                Dictionary<int, CombatInputFrame> actualInputs =
+                    ConvertConfirmedInputs(pair.Value);
+                UpdateLastKnownInputs(actualInputs);
+
+                if (TryGetPrediction(
+                        pair.Key,
+                        out PredictionFrame prediction))
+                {
+                    SendConfirmedHash(
+                        pair.Key,
+                        prediction.PredictedHash);
+                }
             }
         }
 
-        private bool TryDequeueFrame(long frameId, out FrameData frameData)
+        private void ReplayFromEarliestMismatch(
+            long earliestMismatch,
+            long latestConfirmed,
+            Dictionary<long, FrameData> confirmedByFrame)
+        {
+            bool notifyRollback = predictionStarted;
+            CombatWorld.Snapshot baseSnapshot;
+
+            if (TryGetPrediction(
+                    earliestMismatch,
+                    out PredictionFrame mismatchEntry))
+            {
+                baseSnapshot = mismatchEntry.SnapshotBefore;
+            }
+            else if (earliestMismatch == world.Frame + 1)
+            {
+                baseSnapshot = world.CaptureSnapshot();
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"Cannot rollback Frame={earliestMismatch}: " +
+                    "snapshot is no longer in the prediction buffer.");
+            }
+
+            long replayTarget = Math.Max(
+                world.Frame,
+                latestConfirmed);
+            world.RestoreSnapshot(baseSnapshot);
+
+            for (long frameId = earliestMismatch;
+                 frameId <= replayTarget;
+                 frameId++)
+            {
+                Dictionary<int, CombatInputFrame> replayInputs;
+                bool isConfirmed = confirmedByFrame.TryGetValue(
+                    frameId,
+                    out FrameData confirmedFrame);
+
+                if (isConfirmed)
+                {
+                    replayInputs =
+                        ConvertConfirmedInputs(confirmedFrame);
+                }
+                else if (TryGetPrediction(
+                             frameId,
+                             out PredictionFrame historicalPrediction))
+                {
+                    replayInputs = historicalPrediction.Inputs;
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Missing predicted input while replaying Frame={frameId}.");
+                }
+
+                CombatWorld.Snapshot snapshotBefore =
+                    world.CaptureSnapshot();
+                world.Tick(replayInputs);
+                ulong worldHash = world.CalculateWorldHash();
+
+                StorePrediction(new PredictionFrame
+                {
+                    Frame = frameId,
+                    SnapshotBefore = snapshotBefore,
+                    Inputs = CloneInputs(replayInputs),
+                    PredictedHash = worldHash,
+                    Valid = true
+                });
+
+                PublishHash(frameId, worldHash);
+
+                if (isConfirmed)
+                {
+                    UpdateLastKnownInputs(replayInputs);
+                    SendConfirmedHash(frameId, worldHash);
+                }
+
+                world.DrainEvents(discardedReplayEvents);
+
+                // 确认帧重演产生的是权威事件，可以在最终重演完成后补发。
+                // 已由预测阶段播放过的事件通过 Key 去重，避免重复 Trigger。
+                if (isConfirmed)
+                {
+                    for (int eventIndex = 0;
+                         eventIndex < discardedReplayEvents.Count;
+                         eventIndex++)
+                    {
+                        CombatEvent combatEvent =
+                            discardedReplayEvents[eventIndex];
+                        CombatEventKey key =
+                            new CombatEventKey(combatEvent);
+
+                        if (emittedCombatEvents.Add(key))
+                        {
+                            committedEvents.Add(combatEvent);
+                        }
+                    }
+                }
+
+                discardedReplayEvents.Clear();
+            }
+
+            lastConfirmedFrame = Math.Max(
+                lastConfirmedFrame,
+                latestConfirmed);
+
+            if (notifyRollback)
+            {
+                RollbackCompleted?.Invoke(world.Frame);
+            }
+        }
+
+        private List<FrameData> TakeIncomingFrames()
         {
             lock (incomingFrameLock)
             {
-                // 已经确认并执行过的迟到包不参与回放。
-                while (incomingFrames.Count > 0)
+                if (incomingFrames.Count == 0)
                 {
-                    long firstBufferedFrame = 0;
-                    foreach (long bufferedFrame in incomingFrames.Keys)
-                    {
-                        firstBufferedFrame = bufferedFrame;
-                        break;
-                    }
-
-                    if (firstBufferedFrame >= frameId)
-                    {
-                        break;
-                    }
-
-                    incomingFrames.Remove(firstBufferedFrame);
+                    return null;
                 }
 
-                if (!incomingFrames.TryGetValue(
-                        frameId,
-                        out frameData))
-                {
-                    return false;
-                }
-
-                incomingFrames.Remove(frameId);
-                return true;
+                List<FrameData> result =
+                    new List<FrameData>(incomingFrames.Count);
+                result.AddRange(incomingFrames.Values);
+                incomingFrames.Clear();
+                return result;
             }
         }
 
-        private void ExecuteCommittedFrame(FrameData frameData)
+        private Dictionary<int, CombatInputFrame> ConvertConfirmedInputs(
+            FrameData frameData)
         {
-            if (frameData.Frame != CurrentFrame)
-            {
-                throw new InvalidOperationException(
-                    $"Lockstep frame mismatch. Received {frameData.Frame}, " +
-                    $"expected {CurrentFrame}.");
-            }
-
             if (frameData.Inputs.Length != playerIds.Count)
             {
                 throw new InvalidOperationException(
                     $"Frame {frameData.Frame} is incomplete. " +
-                    $"Expected {playerIds.Count} players, " +
+                    $"Expected {playerIds.Count}, " +
                     $"received {frameData.Inputs.Length}.");
             }
 
-            Dictionary<int, CombatInputFrame> combatInputs =
-                new Dictionary<int, CombatInputFrame>(playerIds.Count);
+            Dictionary<int, CombatInputFrame> result =
+                new Dictionary<int, CombatInputFrame>(
+                    playerIds.Count);
 
             for (int i = 0; i < frameData.Inputs.Length; i++)
             {
-                FrameInput frameInput = frameData.Inputs[i];
-
-                if (!pendingInputMasks.ContainsKey(frameInput.PlayerId))
+                FrameInput input = frameData.Inputs[i];
+                if (!pendingInputMasks.ContainsKey(input.PlayerId))
                 {
                     throw new InvalidOperationException(
                         $"Frame {frameData.Frame} contains unregistered " +
-                        $"PlayerId={frameInput.PlayerId}.");
+                        $"PlayerId={input.PlayerId}.");
                 }
 
-                if (combatInputs.ContainsKey(frameInput.PlayerId))
+                if (!result.TryAdd(
+                        input.PlayerId,
+                        ToCombatInput(input)))
                 {
                     throw new InvalidOperationException(
                         $"Frame {frameData.Frame} contains duplicate " +
-                        $"PlayerId={frameInput.PlayerId}.");
+                        $"PlayerId={input.PlayerId}.");
                 }
-
-                preferredTargets.TryGetValue(
-                    frameInput.PlayerId,
-                    out int targetEntityId);
-
-                combatInputs.Add(
-                    frameInput.PlayerId,
-                    ToCombatInput(frameInput, targetEntityId));
             }
 
             for (int i = 0; i < playerIds.Count; i++)
             {
-                if (!combatInputs.ContainsKey(playerIds[i]))
+                if (!result.ContainsKey(playerIds[i]))
                 {
                     throw new InvalidOperationException(
-                        $"Frame {frameData.Frame} is missing input for " +
+                        $"Frame {frameData.Frame} is missing " +
                         $"PlayerId={playerIds[i]}.");
                 }
             }
 
-            world.Tick(combatInputs);
-            world.DrainEvents(committedEvents);
+            return result;
         }
 
-        private static CombatInputFrame ToCombatInput(
-            FrameInput input,
-            int targetEntityId)
+        private void UpdateLastKnownInputs(
+            Dictionary<int, CombatInputFrame> inputs)
+        {
+            foreach (KeyValuePair<int, CombatInputFrame> pair in inputs)
+            {
+                lastKnownInputs[pair.Key] = pair.Value;
+            }
+        }
+
+        private void SendConfirmedHash(long frameId, ulong worldHash)
+        {
+            if (network == null ||
+                !network.IsConnected ||
+                frameId > int.MaxValue)
+            {
+                return;
+            }
+
+            network.TrySendFrameHash((int)frameId, worldHash);
+        }
+
+        private void PublishHash(long frameId, ulong worldHash)
+        {
+            CurrentWorldHash = worldHash;
+            WorldHashCalculated?.Invoke(frameId, worldHash);
+        }
+
+        private void DrainPredictionEvents()
+        {
+            world.DrainEvents(discardedReplayEvents);
+
+            for (int i = 0; i < discardedReplayEvents.Count; i++)
+            {
+                CombatEvent combatEvent = discardedReplayEvents[i];
+                emittedCombatEvents.Add(
+                    new CombatEventKey(combatEvent));
+                committedEvents.Add(combatEvent);
+            }
+
+            discardedReplayEvents.Clear();
+        }
+
+        private void StorePrediction(PredictionFrame frame)
+        {
+            int index = (int)(frame.Frame % predictionBuffer.Length);
+            predictionBuffer[index] = frame;
+        }
+
+        private bool TryGetPrediction(
+            long frameId,
+            out PredictionFrame prediction)
+        {
+            int index = (int)(frameId % predictionBuffer.Length);
+            prediction = predictionBuffer[index];
+            return prediction != null &&
+                   prediction.Valid &&
+                   prediction.Frame == frameId;
+        }
+
+        private static Dictionary<int, CombatInputFrame> CloneInputs(
+            Dictionary<int, CombatInputFrame> inputs)
+        {
+            return new Dictionary<int, CombatInputFrame>(inputs);
+        }
+
+        private static bool InputsEqual(
+            Dictionary<int, CombatInputFrame> predicted,
+            Dictionary<int, CombatInputFrame> actual)
+        {
+            if (predicted.Count != actual.Count)
+            {
+                return false;
+            }
+
+            foreach (KeyValuePair<
+                         int,
+                         CombatInputFrame> pair in predicted)
+            {
+                if (!actual.TryGetValue(
+                        pair.Key,
+                        out CombatInputFrame actualInput) ||
+                    !InputEqual(pair.Value, actualInput))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool InputEqual(
+            CombatInputFrame left,
+            CombatInputFrame right)
+        {
+            return left.TargetEntityId == right.TargetEntityId &&
+                   left.PrimaryAttackPressed ==
+                   right.PrimaryAttackPressed &&
+                   left.SecondaryAttackPressed ==
+                   right.SecondaryAttackPressed &&
+                   left.UltimatePressed == right.UltimatePressed &&
+                   left.HasMoveInput == right.HasMoveInput &&
+                   left.MoveDirection.X.RawValue ==
+                   right.MoveDirection.X.RawValue &&
+                   left.MoveDirection.Y.RawValue ==
+                   right.MoveDirection.Y.RawValue &&
+                   left.MoveDirection.Z.RawValue ==
+                   right.MoveDirection.Z.RawValue;
+        }
+
+        private static CombatInputFrame ToCombatInput(FrameInput input)
         {
             Fix64 x = Fix64.Zero;
             Fix64 z = Fix64.Zero;
@@ -527,17 +892,19 @@ namespace Combat.Core
             if (input.Has(FrameInputMask.MoveRight)) x += Fix64.One;
             if (input.Has(FrameInputMask.MoveLeft)) x -= Fix64.One;
 
-            LogicVector3 direction = new LogicVector3(x, Fix64.Zero, z);
+            LogicVector3 direction =
+                new LogicVector3(x, Fix64.Zero, z);
             return new CombatInputFrame
             {
-                TargetEntityId = targetEntityId,
+                TargetEntityId = input.TargetEntityId,
                 PrimaryAttackPressed =
                     input.Has(FrameInputMask.PrimaryAttack),
                 SecondaryAttackPressed =
                     input.Has(FrameInputMask.SecondaryAttack),
                 UltimatePressed =
                     input.Has(FrameInputMask.Jump),
-                HasMoveInput = direction.SqrMagnitude > Fix64.Zero,
+                HasMoveInput =
+                    direction.SqrMagnitude > Fix64.Zero,
                 MoveDirection = direction
             };
         }

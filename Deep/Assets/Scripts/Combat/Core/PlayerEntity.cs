@@ -42,6 +42,8 @@ namespace Combat.Core
             this.config = config ?? throw new ArgumentNullException(nameof(config));
             LogicalPosition = spawnPosition;
             LogicalRotation = spawnRotation;
+            PreviousLogicalPosition = spawnPosition;
+            PreviousLogicalRotation = spawnRotation;
             CurrentHP = config.MaxHP;
         }
 
@@ -51,19 +53,342 @@ namespace Combat.Core
 
         public LogicVector3 LogicalPosition { get; private set; }
         public LogicRotation LogicalRotation { get; private set; }
+        public LogicVector3 PreviousLogicalPosition { get; private set; }
+        public LogicRotation PreviousLogicalRotation { get; private set; }
         public Fix64 CurrentHP { get; private set; }
         public AttackState AttackState { get; private set; } = AttackState.None;
         public AttackPhase AttackPhase { get; private set; } = AttackPhase.None;
         public int AttackFrame { get; private set; }
+        public long CurrentFrame => currentFrame;
         public LogicVector3 KnockbackVelocity => knockbackVelocity;
         public bool IsDead { get; private set; }
         public bool IsHurt { get; private set; }
+        public bool IsMoving { get; private set; }
 
         public int ComboHitCount => comboHitCount;
         public bool UltimateReady => comboHitCount >= config.RequiredComboHits;
         public bool IsInCombo => AttackState != AttackState.None || comboHitCount > 0;
         public bool CanMove => !IsDead && !IsHurt && AttackState == AttackState.None;
         public bool CanAttack => !IsDead && !IsHurt;
+
+        /// <summary>
+        /// PlayerEntity 的完整可回滚逻辑状态。
+        /// 不包含不可变配置、临时查询缓存和表现层对象。
+        /// </summary>
+        public sealed class Snapshot
+        {
+            internal readonly int EntityId;
+            internal readonly int PreferredTargetId;
+            internal readonly LogicVector3 LogicalPosition;
+            internal readonly LogicRotation LogicalRotation;
+            internal readonly LogicVector3 PreviousLogicalPosition;
+            internal readonly LogicRotation PreviousLogicalRotation;
+            internal readonly Fix64 CurrentHP;
+            internal readonly AttackState AttackState;
+            internal readonly AttackPhase AttackPhase;
+            internal readonly int AttackFrame;
+            internal readonly LogicVector3 KnockbackVelocity;
+            internal readonly bool IsDead;
+            internal readonly bool IsHurt;
+            internal readonly bool IsMoving;
+            internal readonly AttackState BufferedAttack;
+            internal readonly bool UltimateInputBuffered;
+            internal readonly int ComboHitCount;
+            internal readonly int ComboCounterWindowRemaining;
+            internal readonly Fix64 HurtTimer;
+            internal readonly LogicVector3 UltimateStartPosition;
+            internal readonly LogicVector3 UltimateFurthestPosition;
+            internal readonly Fix64 UltimateFurthestDistanceSqr;
+            internal readonly long CurrentFrame;
+            internal readonly int[] HitTargetsThisAttack;
+
+            internal Snapshot(PlayerEntity entity)
+            {
+                EntityId = entity.EntityId;
+                PreferredTargetId = entity.PreferredTargetId;
+                LogicalPosition = entity.LogicalPosition;
+                LogicalRotation = entity.LogicalRotation;
+                PreviousLogicalPosition =
+                    entity.PreviousLogicalPosition;
+                PreviousLogicalRotation =
+                    entity.PreviousLogicalRotation;
+                CurrentHP = entity.CurrentHP;
+                AttackState = entity.AttackState;
+                AttackPhase = entity.AttackPhase;
+                AttackFrame = entity.AttackFrame;
+                KnockbackVelocity = entity.knockbackVelocity;
+                IsDead = entity.IsDead;
+                IsHurt = entity.IsHurt;
+                IsMoving = entity.IsMoving;
+                BufferedAttack = entity.bufferedAttack;
+                UltimateInputBuffered = entity.ultimateInputBuffered;
+                ComboHitCount = entity.comboHitCount;
+                ComboCounterWindowRemaining =
+                    entity.comboCounterWindowRemaining;
+                HurtTimer = entity.hurtTimer;
+                UltimateStartPosition = entity.ultimateStartPosition;
+                UltimateFurthestPosition = entity.ultimateFurthestPosition;
+                UltimateFurthestDistanceSqr =
+                    entity.ultimateFurthestDistanceSqr;
+                CurrentFrame = entity.currentFrame;
+                HitTargetsThisAttack =
+                    new int[entity.hitTargetsThisAttack.Count];
+                entity.hitTargetsThisAttack.CopyTo(
+                    HitTargetsThisAttack);
+            }
+        }
+
+        public Snapshot CaptureSnapshot()
+        {
+            return new Snapshot(this);
+        }
+
+        public void RestoreSnapshot(Snapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            if (snapshot.EntityId != EntityId)
+            {
+                throw new InvalidOperationException(
+                    $"Snapshot EntityId {snapshot.EntityId} does not match {EntityId}.");
+            }
+
+            PreferredTargetId = snapshot.PreferredTargetId;
+            LogicalPosition = snapshot.LogicalPosition;
+            LogicalRotation = snapshot.LogicalRotation;
+            PreviousLogicalPosition =
+                snapshot.PreviousLogicalPosition;
+            PreviousLogicalRotation =
+                snapshot.PreviousLogicalRotation;
+            CurrentHP = snapshot.CurrentHP;
+            AttackState = snapshot.AttackState;
+            AttackPhase = snapshot.AttackPhase;
+            AttackFrame = snapshot.AttackFrame;
+            knockbackVelocity = snapshot.KnockbackVelocity;
+            IsDead = snapshot.IsDead;
+            IsHurt = snapshot.IsHurt;
+            IsMoving = snapshot.IsMoving;
+            bufferedAttack = snapshot.BufferedAttack;
+            ultimateInputBuffered = snapshot.UltimateInputBuffered;
+            comboHitCount = snapshot.ComboHitCount;
+            comboCounterWindowRemaining =
+                snapshot.ComboCounterWindowRemaining;
+            hurtTimer = snapshot.HurtTimer;
+            ultimateStartPosition = snapshot.UltimateStartPosition;
+            ultimateFurthestPosition =
+                snapshot.UltimateFurthestPosition;
+            ultimateFurthestDistanceSqr =
+                snapshot.UltimateFurthestDistanceSqr;
+            currentFrame = snapshot.CurrentFrame;
+
+            hitTargetsThisAttack.Clear();
+            for (int i = 0;
+                 i < snapshot.HitTargetsThisAttack.Length;
+                 i++)
+            {
+                hitTargetsThisAttack.Add(
+                    snapshot.HitTargetsThisAttack[i]);
+            }
+
+            targetBuffer.Clear();
+            pendingEvents.Clear();
+        }
+
+        /// <summary>
+        /// 计算当前实体的确定性逻辑状态哈希。
+        ///
+        /// 只使用固定字段顺序和 RawValue，不使用 GetHashCode，因为托管对象的
+        /// HashCode 可能随运行时、进程或对象地址变化，不能用于锁步校验。
+        /// </summary>
+        public ulong CalculateHash()
+        {
+            ulong hash = StateHash.Create();
+
+            hash = StateHash.AppendInt32(hash, EntityId);
+            hash = StateHash.AppendInt32(hash, PreferredTargetId);
+            hash = StateHash.AppendInt64(hash, currentFrame);
+
+            hash = StateHash.AppendVector3(hash, LogicalPosition);
+            hash = StateHash.AppendRotation(hash, LogicalRotation);
+            hash = StateHash.AppendFix64(hash, CurrentHP);
+
+            hash = StateHash.AppendInt32(hash, (int)AttackState);
+            hash = StateHash.AppendInt32(hash, (int)AttackPhase);
+            hash = StateHash.AppendInt32(hash, AttackFrame);
+            hash = StateHash.AppendBoolean(hash, IsHurt);
+            hash = StateHash.AppendBoolean(hash, IsDead);
+            hash = StateHash.AppendBoolean(hash, IsMoving);
+
+            hash = StateHash.AppendFix64(hash, hurtTimer);
+            hash = StateHash.AppendVector3(hash, knockbackVelocity);
+
+            hash = StateHash.AppendInt32(hash, (int)bufferedAttack);
+            hash = StateHash.AppendBoolean(hash, ultimateInputBuffered);
+            hash = StateHash.AppendInt32(hash, comboHitCount);
+            hash = StateHash.AppendInt32(
+                hash,
+                comboCounterWindowRemaining);
+
+            hash = StateHash.AppendVector3(
+                hash,
+                ultimateStartPosition);
+            hash = StateHash.AppendVector3(
+                hash,
+                ultimateFurthestPosition);
+            hash = StateHash.AppendFix64(
+                hash,
+                ultimateFurthestDistanceSqr);
+
+            hash = AppendHitTargetsHash(hash);
+            hash = AppendConfigHash(hash, config);
+
+            return hash;
+        }
+
+        private ulong AppendHitTargetsHash(ulong hash)
+        {
+            // HashSet 的枚举顺序没有稳定承诺。
+            // 对每个元素独立哈希后累加，使最终结果与遍历顺序无关。
+            ulong orderIndependent = 0;
+            int count = 0;
+
+            foreach (int targetEntityId in hitTargetsThisAttack)
+            {
+                ulong targetHash = StateHash.Create();
+                targetHash = StateHash.AppendInt32(
+                    targetHash,
+                    targetEntityId);
+                orderIndependent = unchecked(
+                    orderIndependent + targetHash);
+                count++;
+            }
+
+            hash = StateHash.AppendInt32(hash, count);
+            return StateHash.AppendUInt64(hash, orderIndependent);
+        }
+
+        private static ulong AppendConfigHash(
+            ulong hash,
+            PlayerCombatConfig value)
+        {
+            if (value == null)
+            {
+                return StateHash.AppendByte(hash, 0);
+            }
+
+            hash = StateHash.AppendByte(hash, 1);
+            hash = StateHash.AppendInt32(hash, value.Id);
+            hash = StateHash.AppendString(hash, value.Name);
+            hash = StateHash.AppendFix64(hash, value.MaxHP);
+            hash = StateHash.AppendFix64(hash, value.MoveSpeed);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.MoveInputDeadZone);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.RotationSharpness);
+            hash = StateHash.AppendFix64(hash, value.MapMinX);
+            hash = StateHash.AppendFix64(hash, value.MapMaxX);
+            hash = StateHash.AppendFix64(hash, value.MapMinZ);
+            hash = StateHash.AppendFix64(hash, value.MapMaxZ);
+            hash = StateHash.AppendFix64(hash, value.HitStunDuration);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.KnockbackFriction);
+            hash = StateHash.AppendVector3(hash, value.HurtBoxSize);
+            hash = StateHash.AppendVector3(
+                hash,
+                value.HurtBoxLocalOffset);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.RequiredComboHits);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.ComboCounterWindowFrames);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.UltimateKnockbackDistanceScale);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.UltimateHitNormalizedFallback);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.UltimateHitWindowFrames);
+            hash = StateHash.AppendBoolean(
+                hash,
+                value.AllowSelfHitWhenNoTarget);
+
+            CombatAttackConfig[] attacks = value.Attacks;
+            int attackCount = attacks?.Length ?? 0;
+            hash = StateHash.AppendInt32(hash, attackCount);
+
+            for (int i = 0; i < attackCount; i++)
+            {
+                hash = AppendAttackConfigHash(hash, attacks[i]);
+            }
+
+            return hash;
+        }
+
+        private static ulong AppendAttackConfigHash(
+            ulong hash,
+            CombatAttackConfig value)
+        {
+            if (value == null)
+            {
+                return StateHash.AppendByte(hash, 0);
+            }
+
+            hash = StateHash.AppendByte(hash, 1);
+            hash = StateHash.AppendString(hash, value.Id);
+            hash = StateHash.AppendInt32(hash, value.OwnerId);
+            hash = StateHash.AppendInt32(
+                hash,
+                (int)value.AttackState);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.ActiveStartFrame);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.ActiveEndFrame);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.RecoveryFrames);
+            hash = StateHash.AppendFix64(hash, value.Damage);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.KnockbackSpeed);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.ForwardMoveDistance);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.ForwardMoveStartFrame);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.ForwardMoveEndFrame);
+            hash = StateHash.AppendVector3(
+                hash,
+                value.AttackBoxSize);
+            hash = StateHash.AppendVector3(
+                hash,
+                value.AttackBoxLocalOffset);
+            hash = StateHash.AppendString(hash, value.MotionData);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.MotionLandingFrame);
+            hash = StateHash.AppendInt32(
+                hash,
+                value.MotionLastHorizontalFrame);
+            hash = StateHash.AppendFix64(
+                hash,
+                value.MotionHorizontalDistance);
+
+            return hash;
+        }
 
         public void SetPreferredTarget(int targetEntityId)
         {
@@ -72,7 +397,10 @@ namespace Combat.Core
 
         internal void BeginFrame(long frame)
         {
+            PreviousLogicalPosition = LogicalPosition;
+            PreviousLogicalRotation = LogicalRotation;
             currentFrame = frame;
+            IsMoving = false;
         }
 
         public void DrainEvents(List<CombatEvent> destination)
@@ -92,6 +420,8 @@ namespace Combat.Core
         {
             LogicalPosition = position;
             LogicalRotation = rotation;
+            PreviousLogicalPosition = position;
+            PreviousLogicalRotation = rotation;
             CurrentHP = config.MaxHP;
             AttackState = AttackState.None;
             AttackPhase = AttackPhase.None;
@@ -99,6 +429,7 @@ namespace Combat.Core
             knockbackVelocity = LogicVector3.Zero;
             IsDead = false;
             IsHurt = false;
+            IsMoving = false;
             hurtTimer = Fix64.Zero;
             comboHitCount = 0;
             comboCounterWindowRemaining = 0;
@@ -119,6 +450,13 @@ namespace Combat.Core
             {
                 return;
             }
+
+            // TargetEntityId 来自服务端确认后的网络输入。
+            // 大于 0 时它是本帧唯一权威目标；0 表示本帧没有明确目标，
+            // 后续攻击逻辑可以继续使用自动寻找最近目标的规则。
+            PreferredTargetId = input.TargetEntityId > 0
+                ? input.TargetEntityId
+                : 0;
 
             TickComboCounterWindow();
 
@@ -615,6 +953,7 @@ namespace Combat.Core
             LogicVector3 moveDirection = flattenedInput.Normalized();
             Fix64 speed = Fix64.Max(Fix64.Zero, config.MoveSpeed);
             LogicalPosition += moveDirection * (speed * deltaTime);
+            IsMoving = true;
             LogicalRotation = LogicRotation.SmoothTowards(
                 LogicalRotation,
                 LogicRotation.LookTowards(moveDirection),

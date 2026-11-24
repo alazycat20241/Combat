@@ -41,12 +41,22 @@ public sealed class PlayerController : MonoBehaviour
     [SerializeField] private InputActionReference primaryAttackInputReference;
     [SerializeField] private InputActionReference secondaryAttackInputReference;
     [SerializeField] private InputActionReference ultimateInputReference;
-        [Tooltip("WASD 相对哪个 Transform 解释。留空时使用 Camera.main")]
-        [SerializeField] private Transform movementReference;
+    [Tooltip("WASD 相对哪个 Transform 解释。留空时使用 Camera.main")]
+    [SerializeField] private Transform movementReference;
 
-    [Header("表现平滑")]
-    [SerializeField, Min(0f)] private float visualFollowSharpness = 25f;
-    [SerializeField, Min(0f)] private float animationDampTime = 0.2f;
+    [Header("移动动画")]
+    [SerializeField, Min(0f)] private float moveAnimationDelay = 0.1f;
+    [SerializeField, Min(0.01f)] private float moveAnimationBlendTime = 0.1f;
+    [SerializeField] private string locomotionStateName = "Move";
+    [SerializeField, Min(0f)] private float rollbackCrossFadeTime = 0.08f;
+    [SerializeField, Min(0f)] private float actionCrossFadeTime = 0.05f;
+    [SerializeField, Min(0.1f)] private float maxActionVisualDuration = 3f;
+
+    [Header("回滚视觉包容")]
+    [SerializeField, Min(0f)] private float rollbackFastCorrectionDistance = 0.2f;
+    [SerializeField, Min(0f)] private float rollbackSnapDistance = 0.5f;
+    [SerializeField, Min(0.01f)] private float rollbackCorrectionDuration = 0.1f;
+    [SerializeField] private bool enableStrongRollbackFlash = true;
 
     [Header("调试信息")]
     [Tooltip("联机时由服务器分配的稳定实体 ID；单机为 0 时自动生成")]
@@ -60,7 +70,25 @@ public sealed class PlayerController : MonoBehaviour
     private bool ultimateInputLatched;
     private int ultimateVisualSyncEndFrame = -1;
     private bool initialized;
-        private Transform cachedMovementReference;
+    private Transform cachedMovementReference;
+    private long renderFrame = -1;
+    private float renderAlpha = 1f;
+    private Vector3 renderStartPosition;
+    private Quaternion renderStartRotation;
+    private float moveIntentTimer;
+    private float smoothedMoveAmount;
+    private bool correctionActive;
+    private float correctionElapsed;
+    private Vector3 correctionStartPosition;
+    private Vector3 correctionTargetPosition;
+    private Quaternion correctionStartRotation;
+    private Quaternion correctionTargetRotation;
+    private bool pendingRollbackVisualCorrection;
+    private AttackState observedAttackState;
+    private bool observedHurtState;
+    private bool observedDeathState;
+    private string activeActionStateName;
+    private float activeActionStartedAt;
 
     public PlayerEntity Entity => entity;
     public PlayerCombatConfig Config => config;
@@ -123,6 +151,36 @@ public sealed class PlayerController : MonoBehaviour
         {
             // 所有位移由 PlayerEntity 决定，Animator 不能写 Transform.position。
             animator.applyRootMotion = false;
+
+            // Move Blend Tree 位于 Base Layer。
+            // Controller 资产中 Base Layer 权重曾为 0，导致 moveAmount 正常变化，
+            // 但移动动画层完全不参与最终 Pose，只剩 Transform 在平移。
+            if (animator.layerCount > 0)
+            {
+                animator.SetLayerWeight(0, 1f);
+            }
+
+            // Override Layer 用来播放攻击/受击等覆盖动作，保持满权重。
+            if (animator.layerCount > 1)
+            {
+                animator.SetLayerWeight(1, 0f);
+            }
+
+            // 显式从 Base Layer 的 Move 状态启动，避免 Override Layer 的
+            // Empty 默认状态或旧序列化状态让角色停留在无动画 Pose。
+            animator.Rebind();
+            animator.Play(locomotionStateName, 0, 0f);
+            animator.Update(0f);
+
+            float overrideWeight = animator.layerCount > 1
+                ? animator.GetLayerWeight(1)
+                : 0f;
+            Debug.Log(
+                $"[Animator] {name} Controller={animator.runtimeAnimatorController?.name}, " +
+                $"Layers={animator.layerCount}, " +
+                $"BaseWeight={animator.GetLayerWeight(0):0.00}, " +
+                $"OverrideWeight={overrideWeight:0.00}",
+                this);
         }
 
         runtimeEntityId = networkEntityId > 0
@@ -133,6 +191,8 @@ public sealed class PlayerController : MonoBehaviour
             config,
             ToLogicVector(transform.position),
             ToLogicRotation(transform.rotation));
+        renderStartPosition = transform.position;
+        renderStartRotation = transform.rotation;
 
         initialized = true;
 
@@ -195,8 +255,10 @@ public sealed class PlayerController : MonoBehaviour
             }
         }
 
+        ReconcileAnimatorStateFromLogic();
+        UpdateAnimatorLayerWeights();
         UpdateLocomotionAnimation();
-        SmoothVisualTransform();
+        InterpolateVisualTransform();
     }
 
     private void LateUpdate()
@@ -245,19 +307,24 @@ public sealed class PlayerController : MonoBehaviour
             case CombatEventType.AttackStarted:
                 if (combatEvent.SourceEntityId == entity.EntityId)
                 {
-                    SetAnimatorTrigger(combatEvent.AttackState.ToString());
+                    observedAttackState = combatEvent.AttackState;
+                    PlayActionState(
+                        combatEvent.AttackState.ToString(),
+                        true);
                 }
                 break;
             case CombatEventType.HitReaction:
                 if (combatEvent.TargetEntityId == entity.EntityId)
                 {
-                    SetAnimatorTrigger("HitReaction");
+                    observedHurtState = true;
+                    PlayActionState("HitReaction", true);
                 }
                 break;
             case CombatEventType.Died:
                 if (combatEvent.TargetEntityId == entity.EntityId)
                 {
-                    SetAnimatorTrigger("Death");
+                    observedDeathState = true;
+                    PlayActionState("Death", true);
                     ultimateVisualSyncEndFrame = Time.frameCount + 2;
                 }
                 break;
@@ -368,6 +435,147 @@ public sealed class PlayerController : MonoBehaviour
         return cachedMovementReference;
     }
 
+    private void ReconcileAnimatorStateFromLogic()
+    {
+        if (animator == null)
+        {
+            return;
+        }
+
+        if (entity.IsDead)
+        {
+            if (!observedDeathState)
+            {
+                observedDeathState = true;
+                PlayActionState("Death", false);
+            }
+            return;
+        }
+
+        if (entity.IsHurt)
+        {
+            if (!observedHurtState)
+            {
+                observedHurtState = true;
+                PlayActionState("HitReaction", false);
+            }
+            return;
+        }
+
+        if (entity.AttackState != AttackState.None)
+        {
+            if (observedAttackState != entity.AttackState)
+            {
+                observedAttackState = entity.AttackState;
+                PlayActionState(
+                    entity.AttackState.ToString(),
+                    false);
+            }
+            return;
+        }
+
+        bool hadActionState =
+            observedDeathState ||
+            observedHurtState ||
+            observedAttackState != AttackState.None;
+
+        observedDeathState = false;
+        observedHurtState = false;
+        observedAttackState = AttackState.None;
+
+        bool visualActionPlaying =
+            IsVisualActionPlaying();
+
+        if ((hadActionState || activeActionStateName != null) &&
+            !visualActionPlaying &&
+            !correctionActive)
+        {
+            ReturnToLocomotionAfterRollback();
+        }
+    }
+
+    private void PlayActionState(
+        string stateName,
+        bool alsoSetTrigger)
+    {
+        if (animator == null)
+        {
+            return;
+        }
+
+        SetActionLayerActive(true);
+        activeActionStateName = stateName;
+        activeActionStartedAt = Time.time;
+
+        if (alsoSetTrigger)
+        {
+            animator.SetTrigger(stateName);
+        }
+
+        int stateHash = Animator.StringToHash(stateName);
+        if (animator.layerCount > 1 &&
+            animator.HasState(1, stateHash))
+        {
+            animator.CrossFadeInFixedTime(
+                stateHash,
+                actionCrossFadeTime,
+                1,
+                0f);
+        }
+    }
+
+    private bool IsVisualActionPlaying()
+    {
+        if (animator == null ||
+            string.IsNullOrEmpty(activeActionStateName) ||
+            animator.layerCount < 2)
+        {
+            return false;
+        }
+
+        // 安全超时防止某个动作状态因转换配置错误永久锁住表现层。
+        if (Time.time - activeActionStartedAt >
+            maxActionVisualDuration)
+        {
+            return false;
+        }
+
+        AnimatorStateInfo stateInfo =
+            animator.GetCurrentAnimatorStateInfo(1);
+        return stateInfo.IsName(activeActionStateName);
+    }
+
+    private void UpdateAnimatorLayerWeights()
+    {
+        if (animator == null)
+        {
+            return;
+        }
+
+        bool actionLayerRequired =
+            entity.AttackState != AttackState.None ||
+            entity.IsHurt ||
+            entity.IsDead ||
+            IsVisualActionPlaying();
+
+        animator.SetLayerWeight(0, 1f);
+
+        if (animator.layerCount > 1)
+        {
+            animator.SetLayerWeight(
+                1,
+                actionLayerRequired ? 1f : 0f);
+        }
+    }
+
+    private void SetActionLayerActive(bool active)
+    {
+        if (animator != null && animator.layerCount > 1)
+        {
+            animator.SetLayerWeight(1, active ? 1f : 0f);
+        }
+    }
+
     private void UpdateLocomotionAnimation()
     {
         if (animator == null)
@@ -375,31 +583,105 @@ public sealed class PlayerController : MonoBehaviour
             return;
         }
 
-        float moveAmount = entity.CanMove
-            ? Vector2.ClampMagnitude(moveInput, 1f).magnitude
-            : 0f;
+        if (entity.IsMoving)
+        {
+            moveIntentTimer += Time.deltaTime;
+        }
+        else
+        {
+            moveIntentTimer = 0f;
+        }
 
-        animator.SetFloat(
-            "moveAmount",
-            moveAmount,
-            animationDampTime,
-            Time.deltaTime);
+        float targetMoveAmount =
+            entity.IsMoving &&
+            moveIntentTimer >= moveAnimationDelay
+                ? 1f
+                : 0f;
+
+        smoothedMoveAmount = Mathf.MoveTowards(
+            smoothedMoveAmount,
+            targetMoveAmount,
+            Time.deltaTime /
+            Mathf.Max(moveAnimationBlendTime, 0.01f));
+
+        animator.SetFloat("moveAmount", smoothedMoveAmount);
     }
 
-    private void SmoothVisualTransform()
+    private void InterpolateVisualTransform()
     {
-        float interpolation =
-            1f - Mathf.Exp(-visualFollowSharpness * Time.deltaTime);
+        if (pendingRollbackVisualCorrection)
+        {
+            pendingRollbackVisualCorrection = false;
+            ApplyRollbackVisualCorrection();
+        }
+
+        if (correctionActive)
+        {
+            UpdateFastRollbackCorrection();
+            return;
+        }
+
+        if (entity.CurrentFrame != renderFrame)
+        {
+            renderFrame = entity.CurrentFrame;
+            renderAlpha = 0f;
+            renderStartPosition =
+                ToUnityVector(entity.PreviousLogicalPosition);
+            renderStartRotation =
+                ToUnityRotation(entity.PreviousLogicalRotation);
+        }
+
+        float logicFrameDuration = ResolveLogicFrameDuration();
+        renderAlpha = Mathf.Clamp01(
+            renderAlpha +
+            Time.deltaTime / logicFrameDuration);
 
         transform.position = Vector3.Lerp(
-            transform.position,
+            renderStartPosition,
             ToUnityVector(entity.LogicalPosition),
-            interpolation);
-
+            renderAlpha);
         transform.rotation = Quaternion.Slerp(
-            transform.rotation,
+            renderStartRotation,
             ToUnityRotation(entity.LogicalRotation),
-            interpolation);
+            renderAlpha);
+    }
+
+    private float ResolveLogicFrameDuration()
+    {
+        CombatWorld world = CombatSimulationRunner.World;
+        float duration = world != null
+            ? world.FixedDeltaTime.ToFloat()
+            : 0.05f;
+        return Mathf.Max(duration, 0.0001f);
+    }
+
+    private void UpdateFastRollbackCorrection()
+    {
+        // 目标仍读取最新逻辑状态，避免校正过程中又产生新的确认帧。
+        correctionTargetPosition =
+            ToUnityVector(entity.LogicalPosition);
+        correctionTargetRotation =
+            ToUnityRotation(entity.LogicalRotation);
+
+        correctionElapsed += Time.deltaTime;
+        float t = Mathf.Clamp01(
+            correctionElapsed /
+            Mathf.Max(rollbackCorrectionDuration, 0.01f));
+
+        transform.position = Vector3.Lerp(
+            correctionStartPosition,
+            correctionTargetPosition,
+            t);
+        transform.rotation = Quaternion.Slerp(
+            correctionStartRotation,
+            correctionTargetRotation,
+            t);
+
+        if (t >= 1f)
+        {
+            correctionActive = false;
+            ResetRenderInterpolationToCurrent();
+        }
     }
 
     [ContextMenu("调试：恢复满血并重置战斗状态")]
@@ -419,6 +701,113 @@ public sealed class PlayerController : MonoBehaviour
             animator.Rebind();
             animator.Update(0f);
         }
+    }
+
+    /// <summary>
+    /// 回滚重演完成事件入口。
+    ///
+    /// 实际视觉判断延迟到下一次 Update，因为回滚事件之后同一 FixedUpdate
+    /// 可能马上又预测了下一帧，应以最终逻辑状态作为校正目标。
+    /// </summary>
+    public void HandleRollbackVisual(long frameId)
+    {
+        pendingRollbackVisualCorrection = true;
+        ReturnToLocomotionAfterRollback();
+    }
+
+    private void ApplyRollbackVisualCorrection()
+    {
+        Vector3 logicalPosition =
+            ToUnityVector(entity.LogicalPosition);
+        Quaternion logicalRotation =
+            ToUnityRotation(entity.LogicalRotation);
+        float deviation = Vector3.Distance(
+            transform.position,
+            logicalPosition);
+
+        if (deviation < rollbackFastCorrectionDistance)
+        {
+            // 微小误差不直接 Snap。让正常的逻辑帧插值继续吸收，
+            // 或在下一次逻辑状态变化时自然追平。
+            return;
+        }
+
+        if (deviation <= rollbackSnapDistance)
+        {
+            correctionActive = true;
+            correctionElapsed = 0f;
+            correctionStartPosition = transform.position;
+            correctionStartRotation = transform.rotation;
+            correctionTargetPosition = logicalPosition;
+            correctionTargetRotation = logicalRotation;
+            return;
+        }
+
+        SnapVisualToLogic();
+
+        if (enableStrongRollbackFlash && acceptPlayerInput)
+        {
+            RollbackScreenFlash.Trigger();
+        }
+    }
+
+    private void ReturnToLocomotionAfterRollback()
+    {
+        if (animator == null ||
+            entity.AttackState != AttackState.None ||
+            entity.IsHurt ||
+            entity.IsDead)
+        {
+            return;
+        }
+
+        animator.ResetTrigger("LeftPunch");
+        animator.ResetTrigger("RightPunch");
+        animator.ResetTrigger("JumpAttack");
+        animator.ResetTrigger("HitReaction");
+        animator.ResetTrigger("Death");
+
+        activeActionStateName = null;
+        smoothedMoveAmount = entity.IsMoving ? 1f : 0f;
+        moveIntentTimer = entity.IsMoving
+            ? moveAnimationDelay
+            : 0f;
+        animator.SetFloat("moveAmount", smoothedMoveAmount);
+        SetActionLayerActive(false);
+        animator.CrossFadeInFixedTime(
+            locomotionStateName,
+            rollbackCrossFadeTime,
+            0);
+    }
+
+    private void ResetRenderInterpolationToCurrent()
+    {
+        renderFrame = entity.CurrentFrame;
+        renderAlpha = 1f;
+        renderStartPosition =
+            ToUnityVector(entity.LogicalPosition);
+        renderStartRotation =
+            ToUnityRotation(entity.LogicalRotation);
+    }
+
+    /// <summary>
+    /// 强制把视觉对象一次性同步到最终逻辑状态。
+    /// 只用于很大的预测错误。
+    /// </summary>
+    public void SnapVisualToLogic()
+    {
+        if (!initialized || entity == null)
+        {
+            return;
+        }
+
+        ultimateVisualSyncEndFrame = -1;
+        correctionActive = false;
+        pendingRollbackVisualCorrection = false;
+        ResetRenderInterpolationToCurrent();
+        transform.SetPositionAndRotation(
+            ToUnityVector(entity.LogicalPosition),
+            ToUnityRotation(entity.LogicalRotation));
     }
 
     private Vector2 ReadMoveInput()
@@ -479,14 +868,6 @@ public sealed class PlayerController : MonoBehaviour
                Keyboard.current.spaceKey.wasPressedThisFrame;
     }
 
-    private void SetAnimatorTrigger(string triggerName)
-    {
-        if (animator != null)
-        {
-            animator.SetTrigger(triggerName);
-        }
-    }
-
     private static Vector3 ToUnityVector(LogicVector3 value)
     {
         return new Vector3(
@@ -523,8 +904,20 @@ public sealed class PlayerController : MonoBehaviour
             config = CombatConfigDefaults.CreatePlayer();
         }
 
-        visualFollowSharpness = Mathf.Max(0f, visualFollowSharpness);
-        animationDampTime = Mathf.Max(0f, animationDampTime);
+        moveAnimationDelay = Mathf.Max(0f, moveAnimationDelay);
+        moveAnimationBlendTime =
+            Mathf.Max(0.01f, moveAnimationBlendTime);
+        rollbackFastCorrectionDistance =
+            Mathf.Max(0f, rollbackFastCorrectionDistance);
+        rollbackSnapDistance = Mathf.Max(
+            rollbackFastCorrectionDistance,
+            rollbackSnapDistance);
+        rollbackCorrectionDuration =
+            Mathf.Max(0.01f, rollbackCorrectionDuration);
+        actionCrossFadeTime =
+            Mathf.Max(0f, actionCrossFadeTime);
+        maxActionVisualDuration =
+            Mathf.Max(0.1f, maxActionVisualDuration);
     }
 
     private void OnDrawGizmosSelected()
@@ -582,5 +975,60 @@ public sealed class PlayerController : MonoBehaviour
             Mathf.Abs(drawConfig.MapMaxZ.ToFloat() -
                       drawConfig.MapMinZ.ToFloat()));
         Gizmos.DrawWireCube(mapCenter, mapSize);
+    }
+}
+
+/// <summary>
+/// 强回滚时的一次性全屏微闪。
+/// 只在预测误差超过 Snap 阈值且发生在本地玩家时触发。
+/// </summary>
+internal sealed class RollbackScreenFlash : MonoBehaviour
+{
+    private const float FlashDuration = 0.08f;
+    private const float FlashAlpha = 0.18f;
+
+    private static RollbackScreenFlash instance;
+    private float flashEndTime;
+
+    public static void Trigger()
+    {
+        if (instance == null)
+        {
+            GameObject flashObject =
+                new GameObject("[Rollback Screen Flash]");
+            DontDestroyOnLoad(flashObject);
+            instance =
+                flashObject.AddComponent<RollbackScreenFlash>();
+        }
+
+        instance.flashEndTime =
+            Time.unscaledTime + FlashDuration;
+    }
+
+    private void OnGUI()
+    {
+        float remaining = flashEndTime - Time.unscaledTime;
+        if (remaining <= 0f)
+        {
+            return;
+        }
+
+        float alpha =
+            FlashAlpha * Mathf.Clamp01(remaining / FlashDuration);
+        Color previousColor = GUI.color;
+        GUI.depth = -1000;
+        GUI.color = new Color(1f, 1f, 1f, alpha);
+        GUI.DrawTexture(
+            new Rect(0f, 0f, Screen.width, Screen.height),
+            Texture2D.whiteTexture);
+        GUI.color = previousColor;
+    }
+
+    private void OnDestroy()
+    {
+        if (instance == this)
+        {
+            instance = null;
+        }
     }
 }

@@ -352,6 +352,7 @@ namespace Fantasy
             if (!IsPool()) return; 
             frameId = default;
             inputMask = default;
+            targetEntityId = default;
             MessageObjectPool<C2G_SubmitFrameInput>.Return(this);
         }
 
@@ -363,6 +364,7 @@ namespace Fantasy
             }
             other.frameId = frameId;
             other.inputMask = inputMask;
+            other.targetEntityId = targetEntityId;
 
         }
 
@@ -377,6 +379,70 @@ namespace Fantasy
         public int frameId { get; set; }
         [ProtoMember(2)]
         public int inputMask { get; set; }
+        [ProtoMember(3)]
+        public int targetEntityId { get; set; }
+    }
+    [Serializable]
+    [ProtoContract]
+    public partial class C2G_FrameHash : AMessage, IMessage
+    {
+        public static C2G_FrameHash Create(bool autoReturn = true)
+        {
+            var c2G_FrameHash = MessageObjectPool<C2G_FrameHash>.Rent();
+            c2G_FrameHash.AutoReturn = autoReturn;
+            
+            if (!autoReturn)
+            {
+                c2G_FrameHash.SetIsPool(false);
+            }
+            
+            return c2G_FrameHash;
+        }
+        
+        public void Return()
+        {
+            if (!AutoReturn)
+            {
+                SetIsPool(true);
+                AutoReturn = true;
+            }
+            else if (!IsPool())
+            {
+                return;
+            }
+            Dispose();
+        }
+
+        public void Dispose()
+        {
+            if (!IsPool()) return; 
+            frameId = default;
+            worldHash = default;
+            MessageObjectPool<C2G_FrameHash>.Return(this);
+        }
+
+        public void CopyTo(ref C2G_FrameHash other)
+        {
+            if (other == null)
+            {
+                other = Create(false);
+            }
+            other.frameId = frameId;
+            other.worldHash = worldHash;
+
+        }
+
+        public C2G_FrameHash DeepCopy()
+        {
+            var other = Create(false);
+            CopyTo(ref other);
+            return other;
+        }
+        public uint OpCode() { return OuterOpcode.C2G_FrameHash; } 
+        [ProtoMember(1)]
+        public int frameId { get; set; }
+        [ProtoMember(2)]
+        public ulong worldHash { get; set; }
     }
     [Serializable]
     [ProtoContract]
@@ -414,6 +480,7 @@ namespace Fantasy
             if (!IsPool()) return; 
             playerId = default;
             inputMask = default;
+            targetEntityId = default;
             MessageObjectPool<PlayerInputData>.Return(this);
         }
 
@@ -425,6 +492,7 @@ namespace Fantasy
             }
             other.playerId = playerId;
             other.inputMask = inputMask;
+            other.targetEntityId = targetEntityId;
 
         }
 
@@ -438,6 +506,8 @@ namespace Fantasy
         public int playerId { get; set; }
         [ProtoMember(2)]
         public int inputMask { get; set; }
+        [ProtoMember(3)]
+        public int targetEntityId { get; set; }
     }
     [Serializable]
     [ProtoContract]

@@ -61,12 +61,26 @@ namespace Fantasy
 			session.Send(C2G_SubmitFrameInput_message);
 		}
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		public static void C2G_SubmitFrameInput(this Session session, int frameId, int inputMask)
+		public static void C2G_SubmitFrameInput(this Session session, int frameId, int inputMask, int targetEntityId)
 		{
 			using var C2G_SubmitFrameInput_message = Fantasy.C2G_SubmitFrameInput.Create();
 			C2G_SubmitFrameInput_message.frameId = frameId;
 			C2G_SubmitFrameInput_message.inputMask = inputMask;
+			C2G_SubmitFrameInput_message.targetEntityId = targetEntityId;
 			session.Send(C2G_SubmitFrameInput_message);
+		}
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public static void C2G_FrameHash(this Session session, C2G_FrameHash C2G_FrameHash_message)
+		{
+			session.Send(C2G_FrameHash_message);
+		}
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public static void C2G_FrameHash(this Session session, int frameId, ulong worldHash)
+		{
+			using var C2G_FrameHash_message = Fantasy.C2G_FrameHash.Create();
+			C2G_FrameHash_message.frameId = frameId;
+			C2G_FrameHash_message.worldHash = worldHash;
+			session.Send(C2G_FrameHash_message);
 		}
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public static void G2C_FrameData(this Session session, G2C_FrameData G2C_FrameData_message)

@@ -6,6 +6,7 @@ namespace Fantasy
     /// </summary>
     public static partial class OuterOpcode
     {
+        public const uint C2G_FrameHash = 134227734;
         public const uint C2G_JoinLockstep = 134227732;
         public const uint C2G_SubmitFrameInput = 134227729;
         public const uint C2G_TestMessage = 134227730;

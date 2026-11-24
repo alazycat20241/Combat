@@ -32,12 +32,22 @@ message C2G_SubmitFrameInput // IMessage
 {
 	int32 frameId = 1;
 	int32 inputMask = 2;
+	int32 targetEntityId = 3;
+}
+
+// 客户端在本地执行完某一确认帧后，上报确定性世界状态哈希。
+// 服务端收到同一帧所有玩家的 Hash 后进行 Desync 比对。
+message C2G_FrameHash // IMessage
+{
+	int32 frameId = 1;
+	uint64 worldHash = 2;
 }
 
 message PlayerInputData
 {
 	int32 playerId = 1;
 	int32 inputMask = 2;
+	int32 targetEntityId = 3;
 }
 
 message G2C_FrameData // IMessage

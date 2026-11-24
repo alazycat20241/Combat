@@ -1,4 +1,5 @@
 // Fantasy OpCode cache. Generated automatically; do not edit manually.
+C2G_FrameHash = 134227734
 C2G_JoinLockstep = 134227732
 C2G_SubmitFrameInput = 134227729
 C2G_TestMessage = 134227730

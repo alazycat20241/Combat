@@ -141,6 +141,135 @@ namespace Combat.Core
             Step();
         }
 
+        /// <summary>
+        /// 计算当前逻辑帧的世界状态哈希。
+        ///
+        /// EntityId 排序后依次合并实体 Hash，确保实体在列表中的注册顺序
+        /// 不会影响结果。本帧产生的 CombatEvent 也纳入 Hash，便于发现
+        /// “状态看似一致，但事件派发已经分叉”的问题。
+        /// </summary>
+        public ulong CalculateWorldHash()
+        {
+            ulong hash = StateHash.Create();
+            hash = StateHash.AppendInt64(hash, Frame);
+            hash = StateHash.AppendFix64(hash, FixedDeltaTime);
+
+            tickOrder.Clear();
+            tickOrder.AddRange(entities);
+            tickOrder.Sort(EntityIdComparer.Instance);
+            hash = StateHash.AppendInt32(hash, tickOrder.Count);
+
+            for (int i = 0; i < tickOrder.Count; i++)
+            {
+                PlayerEntity entity = tickOrder[i];
+                hash = StateHash.AppendInt32(hash, entity.EntityId);
+                hash = StateHash.AppendUInt64(
+                    hash,
+                    entity.CalculateHash());
+            }
+
+            hash = StateHash.AppendInt32(
+                hash,
+                committedEvents.Count);
+
+            for (int i = 0; i < committedEvents.Count; i++)
+            {
+                CombatEvent combatEvent = committedEvents[i];
+                hash = StateHash.AppendInt64(
+                    hash,
+                    combatEvent.Frame);
+                hash = StateHash.AppendInt32(
+                    hash,
+                    (int)combatEvent.Type);
+                hash = StateHash.AppendInt32(
+                    hash,
+                    combatEvent.SourceEntityId);
+                hash = StateHash.AppendInt32(
+                    hash,
+                    combatEvent.TargetEntityId);
+                hash = StateHash.AppendInt32(
+                    hash,
+                    (int)combatEvent.AttackState);
+                hash = StateHash.AppendFix64(
+                    hash,
+                    combatEvent.Damage);
+            }
+
+            return hash;
+        }
+
+        public sealed class Snapshot
+        {
+            internal readonly long Frame;
+            internal readonly PlayerEntity.Snapshot[] Entities;
+
+            internal Snapshot(
+                long frame,
+                PlayerEntity.Snapshot[] entities)
+            {
+                Frame = frame;
+                Entities = entities;
+            }
+        }
+
+        /// <summary>
+        /// 捕获当前 World 在 Tick 完成后的完整可回滚状态。
+        /// Snapshot 创建后不可修改，可安全放入预测帧环形缓冲区。
+        /// </summary>
+        public Snapshot CaptureSnapshot()
+        {
+            tickOrder.Clear();
+            tickOrder.AddRange(entities);
+            tickOrder.Sort(EntityIdComparer.Instance);
+
+            PlayerEntity.Snapshot[] states =
+                new PlayerEntity.Snapshot[tickOrder.Count];
+
+            for (int i = 0; i < tickOrder.Count; i++)
+            {
+                states[i] = tickOrder[i].CaptureSnapshot();
+            }
+
+            return new Snapshot(Frame, states);
+        }
+
+        /// <summary>
+        /// 恢复到某个预测帧执行前的完整状态。
+        /// 恢复后 pendingInputsByFrame 和 committedEvents 都会被清空，
+        /// 防止旧时间线的事件或输入污染重演。
+        /// </summary>
+        public void RestoreSnapshot(Snapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException(nameof(snapshot));
+            }
+
+            if (snapshot.Entities.Length != entities.Count)
+            {
+                throw new InvalidOperationException(
+                    "Snapshot entity count does not match CombatWorld.");
+            }
+
+            for (int i = 0; i < snapshot.Entities.Length; i++)
+            {
+                PlayerEntity.Snapshot state = snapshot.Entities[i];
+                PlayerEntity entity = FindEntity(state.EntityId);
+                if (entity == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Snapshot entity {state.EntityId} is not registered.");
+                }
+
+                entity.RestoreSnapshot(state);
+            }
+
+            Frame = snapshot.Frame;
+            pendingInputsByFrame.Clear();
+            committedEvents.Clear();
+            tickOrder.Clear();
+        }
+
         public void DrainEvents(List<CombatEvent> destination)
         {
             if (destination == null)
@@ -188,7 +317,6 @@ namespace Combat.Core
                     input = default;
                 }
 
-                entity.SetPreferredTarget(input.TargetEntityId);
                 entity.Tick(input, FixedDeltaTime, tickOrder);
             }
 

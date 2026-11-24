@@ -23,15 +23,18 @@ namespace Combat.Core
         public readonly long Frame;
         public readonly int PlayerId;
         public readonly FrameInputMask InputMask;
+        public readonly int TargetEntityId;
 
         public FrameInput(
             long frame,
             int playerId,
-            FrameInputMask inputMask)
+            FrameInputMask inputMask,
+            int targetEntityId = 0)
         {
             Frame = frame;
             PlayerId = playerId;
             InputMask = inputMask;
+            TargetEntityId = targetEntityId;
         }
 
         public bool Has(FrameInputMask mask)

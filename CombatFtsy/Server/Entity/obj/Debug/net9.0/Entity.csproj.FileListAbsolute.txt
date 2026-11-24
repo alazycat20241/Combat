@@ -20,3 +20,11 @@ D:\unityzuoye\Combat\Deep\.codex_tmp\PlayerIdProtocol\FullBuildOut\Fantasy.confi
 D:\unityzuoye\Combat\Deep\.codex_tmp\PlayerIdProtocol\FullBuildOut\Entity.deps.json
 D:\unityzuoye\Combat\Deep\.codex_tmp\PlayerIdProtocol\FullBuildOut\Entity.dll
 D:\unityzuoye\Combat\Deep\.codex_tmp\PlayerIdProtocol\FullBuildOut\Entity.pdb
+D:\unityzuoye\Combat\Deep\.codex_tmp\DesyncProtocol\FullBuildOut\Fantasy.config
+D:\unityzuoye\Combat\Deep\.codex_tmp\DesyncProtocol\FullBuildOut\Entity.deps.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\DesyncProtocol\FullBuildOut\Entity.dll
+D:\unityzuoye\Combat\Deep\.codex_tmp\DesyncProtocol\FullBuildOut\Entity.pdb
+D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Fantasy.config
+D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Entity.deps.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Entity.dll
+D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Entity.pdb
