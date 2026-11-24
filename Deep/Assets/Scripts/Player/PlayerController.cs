@@ -182,11 +182,30 @@ public sealed class PlayerController : MonoBehaviour
         runtimeEntityId = networkEntityId > 0
             ? networkEntityId
             : nextRuntimeEntityId++;
+
+        LogicVector3 logicPosition =
+            ToLogicVector(transform.position);
+        LogicRotation logicRotation =
+            ToLogicRotation(transform.rotation);
+        if (CombatSpawnRules.TryGetSpawn(
+                runtimeEntityId,
+                out LogicVector3 canonicalPosition,
+                out LogicRotation canonicalRotation))
+        {
+            // 锁步实体必须使用共享出生规则。Transform 只负责把这个位置
+            // 显示出来，不能再成为比赛初始状态的来源。
+            logicPosition = canonicalPosition;
+            logicRotation = canonicalRotation;
+            transform.SetPositionAndRotation(
+                ToUnityVector(logicPosition),
+                ToUnityRotation(logicRotation));
+        }
+
         entity = new PlayerEntity(
             runtimeEntityId,
             config,
-            ToLogicVector(transform.position),
-            ToLogicRotation(transform.rotation));
+            logicPosition,
+            logicRotation);
         renderStartPosition = transform.position;
         renderStartRotation = transform.rotation;
 
@@ -707,6 +726,39 @@ public sealed class PlayerController : MonoBehaviour
     {
         pendingRollbackVisualCorrection = true;
         ReturnToLocomotionAfterRollback();
+    }
+
+    /// <summary>
+    /// 重连权威快照应用后的唯一一次表现层重建。
+    ///
+    /// 这里不能根据“快照期间错过了哪些帧”逐个补播动画，只按当前实体状态
+    /// 切到正确动作，并把 Transform 直接贴到权威逻辑位置。
+    /// </summary>
+    public void HandleReconnectVisual(long frameId)
+    {
+        if (!initialized || entity == null)
+        {
+            return;
+        }
+
+        SnapVisualToLogic();
+
+        animator?.ResetTrigger("LeftPunch");
+        animator?.ResetTrigger("RightPunch");
+        animator?.ResetTrigger("JumpAttack");
+        animator?.ResetTrigger("HitReaction");
+        animator?.ResetTrigger("Death");
+
+        observedAttackState = AttackState.None;
+        observedHurtState = false;
+        observedDeathState = false;
+        activeActionStateName = null;
+        moveIntentTimer = 0f;
+        smoothedMoveAmount = entity.IsMoving ? 1f : 0f;
+        animator?.SetFloat("moveAmount", smoothedMoveAmount);
+
+        ReconcileAnimatorStateFromLogic();
+        UpdateAnimatorLayerWeights();
     }
 
     private void ApplyRollbackVisualCorrection()

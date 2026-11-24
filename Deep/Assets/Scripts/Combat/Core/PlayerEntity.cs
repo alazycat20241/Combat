@@ -72,6 +72,40 @@ namespace Combat.Core
         public bool CanAttack => !IsDead && !IsHurt;
 
         /// <summary>
+        /// 与网络、存档和回滚系统交换的纯数据快照。
+        ///
+        /// Snapshot 自身保持不可变；这个 DTO 只承担跨程序集复制职责。
+        /// Unity 客户端和 .NET 服务端都可以使用它，不需要反射读取私有字段。
+        /// </summary>
+        public sealed class SnapshotData
+        {
+            public int EntityId;
+            public int PreferredTargetId;
+            public LogicVector3 LogicalPosition;
+            public LogicVector3 PreviousLogicalPosition;
+            public LogicRotation LogicalRotation;
+            public LogicRotation PreviousLogicalRotation;
+            public Fix64 CurrentHP;
+            public AttackState AttackState;
+            public AttackPhase AttackPhase;
+            public int AttackFrame;
+            public LogicVector3 KnockbackVelocity;
+            public bool IsDead;
+            public bool IsHurt;
+            public bool IsMoving;
+            public AttackState BufferedAttack;
+            public bool UltimateInputBuffered;
+            public int ComboHitCount;
+            public int ComboCounterWindowRemaining;
+            public Fix64 HurtTimer;
+            public LogicVector3 UltimateStartPosition;
+            public LogicVector3 UltimateFurthestPosition;
+            public Fix64 UltimateFurthestDistanceSqr;
+            public long CurrentFrame;
+            public int[] HitTargetsThisAttack = Array.Empty<int>();
+        }
+
+        /// <summary>
         /// PlayerEntity 的完整可回滚逻辑状态。
         /// 不包含不可变配置、临时查询缓存和表现层对象。
         /// </summary>
@@ -135,6 +169,96 @@ namespace Combat.Core
                     new int[entity.hitTargetsThisAttack.Count];
                 entity.hitTargetsThisAttack.CopyTo(
                     HitTargetsThisAttack);
+            }
+
+            /// <summary>
+            /// 从网络/存档 DTO 重建快照。RestoreSnapshot 仍会校验 EntityId，
+            /// 因此错误地恢复给另一名玩家会在运行时明确失败。
+            /// </summary>
+            public Snapshot(SnapshotData data)
+            {
+                if (data == null)
+                {
+                    throw new ArgumentNullException(nameof(data));
+                }
+
+                EntityId = data.EntityId;
+                PreferredTargetId = data.PreferredTargetId;
+                LogicalPosition = data.LogicalPosition;
+                LogicalRotation = data.LogicalRotation;
+                PreviousLogicalPosition =
+                    data.PreviousLogicalPosition;
+                PreviousLogicalRotation =
+                    data.PreviousLogicalRotation;
+                CurrentHP = data.CurrentHP;
+                AttackState = data.AttackState;
+                AttackPhase = data.AttackPhase;
+                AttackFrame = data.AttackFrame;
+                KnockbackVelocity = data.KnockbackVelocity;
+                IsDead = data.IsDead;
+                IsHurt = data.IsHurt;
+                IsMoving = data.IsMoving;
+                BufferedAttack = data.BufferedAttack;
+                UltimateInputBuffered =
+                    data.UltimateInputBuffered;
+                ComboHitCount = data.ComboHitCount;
+                ComboCounterWindowRemaining =
+                    data.ComboCounterWindowRemaining;
+                HurtTimer = data.HurtTimer;
+                UltimateStartPosition =
+                    data.UltimateStartPosition;
+                UltimateFurthestPosition =
+                    data.UltimateFurthestPosition;
+                UltimateFurthestDistanceSqr =
+                    data.UltimateFurthestDistanceSqr;
+                CurrentFrame = data.CurrentFrame;
+                HitTargetsThisAttack =
+                    data.HitTargetsThisAttack == null
+                        ? Array.Empty<int>()
+                        : (int[])data.HitTargetsThisAttack.Clone();
+            }
+
+            /// <summary>
+            /// 导出可跨程序集传输的副本。HitTargetsThisAttack 会再次克隆，
+            /// 调用方修改 DTO 不会污染当前逻辑快照。
+            /// </summary>
+            public SnapshotData ToData()
+            {
+                return new SnapshotData
+                {
+                    EntityId = EntityId,
+                    PreferredTargetId = PreferredTargetId,
+                    LogicalPosition = LogicalPosition,
+                    PreviousLogicalPosition =
+                        PreviousLogicalPosition,
+                    LogicalRotation = LogicalRotation,
+                    PreviousLogicalRotation =
+                        PreviousLogicalRotation,
+                    CurrentHP = CurrentHP,
+                    AttackState = AttackState,
+                    AttackPhase = AttackPhase,
+                    AttackFrame = AttackFrame,
+                    KnockbackVelocity = KnockbackVelocity,
+                    IsDead = IsDead,
+                    IsHurt = IsHurt,
+                    IsMoving = IsMoving,
+                    BufferedAttack = BufferedAttack,
+                    UltimateInputBuffered =
+                        UltimateInputBuffered,
+                    ComboHitCount = ComboHitCount,
+                    ComboCounterWindowRemaining =
+                        ComboCounterWindowRemaining,
+                    HurtTimer = HurtTimer,
+                    UltimateStartPosition =
+                        UltimateStartPosition,
+                    UltimateFurthestPosition =
+                        UltimateFurthestPosition,
+                    UltimateFurthestDistanceSqr =
+                        UltimateFurthestDistanceSqr,
+                    CurrentFrame = CurrentFrame,
+                    HitTargetsThisAttack =
+                        (int[])HitTargetsThisAttack.Clone()
+                };
             }
         }
 

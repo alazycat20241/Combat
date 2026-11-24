@@ -1,0 +1,216 @@
+{
+  "CreatedAtUtc": "2026-11-24T17:41:33.4030075Z",
+  "RulesetVersion": "combat-core-v1",
+  "CurrentServerFrame": 164,
+  "Frame": 162,
+  "MismatchingPlayerId": 1,
+  "MismatchingClientHash": 1864512214162981342,
+  "ServerAuthorityHash": 4162676846979883601,
+  "ServerStateHash": 4162676846979883601,
+  "ClientHashes": [
+    {
+      "PlayerId": 2,
+      "WorldHash": 1864512214162981342
+    },
+    {
+      "PlayerId": 1,
+      "WorldHash": 1864512214162981342
+    }
+  ],
+  "Inputs": [
+    {
+      "PlayerId": 1,
+      "InputMask": 0,
+      "TargetEntityId": 2
+    },
+    {
+      "PlayerId": 2,
+      "InputMask": 0,
+      "TargetEntityId": 1
+    }
+  ],
+  "Players": [
+    {
+      "EntityId": 1,
+      "PreferredTargetId": 2,
+      "LogicalPosition": {
+        "X": {
+          "RawValue": -78578037
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 30741600013
+        }
+      },
+      "PreviousLogicalPosition": {
+        "X": {
+          "RawValue": -78578037
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 30741600013
+        }
+      },
+      "LogicalRotation": {
+        "YawRadians": {
+          "RawValue": 0
+        }
+      },
+      "PreviousLogicalRotation": {
+        "YawRadians": {
+          "RawValue": 0
+        }
+      },
+      "CurrentHP": {
+        "RawValue": 429496729600
+      },
+      "AttackState": 2,
+      "AttackPhase": 2,
+      "AttackFrame": 6,
+      "KnockbackVelocity": {
+        "X": {
+          "RawValue": 0
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 0
+        }
+      },
+      "IsDead": false,
+      "IsHurt": false,
+      "IsMoving": false,
+      "BufferedAttack": 0,
+      "UltimateInputBuffered": false,
+      "ComboHitCount": 2,
+      "ComboCounterWindowRemaining": 29,
+      "HurtTimer": {
+        "RawValue": 0
+      },
+      "UltimateStartPosition": {
+        "X": {
+          "RawValue": 0
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 10952166612
+        }
+      },
+      "UltimateFurthestPosition": {
+        "X": {
+          "RawValue": -78578037
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 21292671961
+        }
+      },
+      "UltimateFurthestDistanceSqr": {
+        "RawValue": 24897098862
+      },
+      "CurrentFrame": 162,
+      "HitTargetsThisAttack": [
+        2
+      ]
+    },
+    {
+      "EntityId": 2,
+      "PreferredTargetId": 1,
+      "LogicalPosition": {
+        "X": {
+          "RawValue": 424601145
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 40749333850
+        }
+      },
+      "PreviousLogicalPosition": {
+        "X": {
+          "RawValue": 380387901
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 39869976352
+        }
+      },
+      "LogicalRotation": {
+        "YawRadians": {
+          "RawValue": 13493037705
+        }
+      },
+      "PreviousLogicalRotation": {
+        "YawRadians": {
+          "RawValue": 13493037705
+        }
+      },
+      "CurrentHP": {
+        "RawValue": 163208757248
+      },
+      "AttackState": 0,
+      "AttackPhase": 0,
+      "AttackFrame": 0,
+      "KnockbackVelocity": {
+        "X": {
+          "RawValue": 582320784
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 11581781660
+        }
+      },
+      "IsDead": false,
+      "IsHurt": true,
+      "IsMoving": false,
+      "BufferedAttack": 0,
+      "UltimateInputBuffered": false,
+      "ComboHitCount": 0,
+      "ComboCounterWindowRemaining": 0,
+      "HurtTimer": {
+        "RawValue": 1288490188
+      },
+      "UltimateStartPosition": {
+        "X": {
+          "RawValue": 0
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 0
+        }
+      },
+      "UltimateFurthestPosition": {
+        "X": {
+          "RawValue": 0
+        },
+        "Y": {
+          "RawValue": 0
+        },
+        "Z": {
+          "RawValue": 0
+        }
+      },
+      "UltimateFurthestDistanceSqr": {
+        "RawValue": 0
+      },
+      "CurrentFrame": 162,
+      "HitTargetsThisAttack": []
+    }
+  ]
+}

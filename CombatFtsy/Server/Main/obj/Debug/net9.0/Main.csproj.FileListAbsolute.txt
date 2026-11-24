@@ -60,3 +60,16 @@ D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Main.deps.json
 D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Main.runtimeconfig.json
 D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Main.dll
 D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Main.pdb
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\CombatData\tbplayercombat.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\CombatData\tbcombatattack.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Fantasy.config
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Main.exe
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\NLog.config
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Main.deps.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Main.runtimeconfig.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Main.dll
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Main.pdb
+D:\unityzuoye\Combat\CombatFtsy\Server\Main\bin\Debug\net9.0\CombatData\tbplayercombat.json
+D:\unityzuoye\Combat\CombatFtsy\Server\Main\bin\Debug\net9.0\CombatData\tbcombatattack.json
+D:\unityzuoye\Combat\CombatFtsy\Server\Main\bin\Debug\net9.0\Combat.Core.Server.dll
+D:\unityzuoye\Combat\CombatFtsy\Server\Main\bin\Debug\net9.0\Combat.Core.Server.pdb

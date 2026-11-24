@@ -28,3 +28,7 @@ D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Fantasy.config
 D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Entity.deps.json
 D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Entity.dll
 D:\unityzuoye\Combat\Deep\.codex_tmp\TargetProtocol\FullBuildOut\Entity.pdb
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Fantasy.config
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Entity.deps.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Entity.dll
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Entity.pdb

@@ -200,15 +200,22 @@ namespace Combat.Core
 
         public sealed class Snapshot
         {
-            internal readonly long Frame;
-            internal readonly PlayerEntity.Snapshot[] Entities;
+            public readonly long Frame;
+            public readonly PlayerEntity.Snapshot[] Entities;
 
-            internal Snapshot(
+            public Snapshot(
                 long frame,
                 PlayerEntity.Snapshot[] entities)
             {
+                if (frame < 0)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(frame));
+                }
+
                 Frame = frame;
-                Entities = entities;
+                Entities = entities == null
+                    ? Array.Empty<PlayerEntity.Snapshot>()
+                    : (PlayerEntity.Snapshot[])entities.Clone();
             }
         }
 
@@ -279,6 +286,23 @@ namespace Combat.Core
 
             destination.AddRange(committedEvents);
             committedEvents.Clear();
+        }
+
+        /// <summary>
+        /// 把世界时钟重置到指定帧，并清空所有尚未执行的输入与事件。
+        /// Entity 的出生状态由上层调用 ResetForTesting 后一起恢复。
+        /// </summary>
+        public void ResetFrame(long frame = 0)
+        {
+            if (frame < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(frame));
+            }
+
+            Frame = frame;
+            pendingInputsByFrame.Clear();
+            committedEvents.Clear();
+            tickOrder.Clear();
         }
 
         /// <summary>

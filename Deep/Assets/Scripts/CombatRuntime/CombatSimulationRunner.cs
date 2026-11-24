@@ -62,6 +62,8 @@ public sealed class CombatSimulationRunner : MonoBehaviour
             Lockstep.WorldHashCalculated += OnWorldHashCalculated;
             Lockstep.RollbackCompleted -= OnRollbackCompleted;
             Lockstep.RollbackCompleted += OnRollbackCompleted;
+            Lockstep.ReconnectStateApplied -= OnReconnectStateApplied;
+            Lockstep.ReconnectStateApplied += OnReconnectStateApplied;
         }
 
         // Runner 在场景加载前创建，此时 NetworkManager 可能还不存在。
@@ -75,6 +77,7 @@ public sealed class CombatSimulationRunner : MonoBehaviour
         {
             Lockstep.WorldHashCalculated -= OnWorldHashCalculated;
             Lockstep.RollbackCompleted -= OnRollbackCompleted;
+            Lockstep.ReconnectStateApplied -= OnReconnectStateApplied;
         }
 
         if (subscribedNetworkManager != null)
@@ -83,6 +86,8 @@ public sealed class CombatSimulationRunner : MonoBehaviour
                 OnFrameDataReceived;
             subscribedNetworkManager.OnPlayerIdAssigned -=
                 OnPlayerIdAssigned;
+            subscribedNetworkManager.OnReconnectStateReceived -=
+                OnReconnectStateReceived;
             subscribedNetworkManager = null;
         }
     }
@@ -108,6 +113,23 @@ public sealed class CombatSimulationRunner : MonoBehaviour
 
         Debug.Log($"[Rollback] Completed at Frame={frameId}.");
     }
+
+        /// <summary>
+        /// 重连快照只在这里写一次表现层。恢复过程和后续预测都不播放历史动画，
+        /// 避免角色在断线追帧时连续“快进”多个动作。
+        /// </summary>
+        private void OnReconnectStateApplied(long frameId)
+        {
+            PlayerController[] players =
+                FindObjectsOfType<PlayerController>();
+
+            for (int i = 0; i < players.Length; i++)
+            {
+                players[i].HandleReconnectVisual(frameId);
+            }
+
+            Debug.Log($"[Reconnect] CombatWorld restored at Frame={frameId}.");
+        }
 
     private void Update()
     {
@@ -188,6 +210,8 @@ public sealed class CombatSimulationRunner : MonoBehaviour
                 OnFrameDataReceived;
             subscribedNetworkManager.OnPlayerIdAssigned -=
                 OnPlayerIdAssigned;
+            subscribedNetworkManager.OnReconnectStateReceived -=
+                OnReconnectStateReceived;
         }
 
         subscribedNetworkManager = currentNetworkManager;
@@ -195,6 +219,8 @@ public sealed class CombatSimulationRunner : MonoBehaviour
             OnFrameDataReceived;
         subscribedNetworkManager.OnPlayerIdAssigned +=
             OnPlayerIdAssigned;
+        subscribedNetworkManager.OnReconnectStateReceived +=
+            OnReconnectStateReceived;
 
         if (currentNetworkManager.LocalPlayerId > 0)
         {
@@ -212,6 +238,147 @@ public sealed class CombatSimulationRunner : MonoBehaviour
 
         serverAssignedPlayerId = playerId;
         TryApplyServerAssignedPlayerId();
+    }
+
+    /// <summary>
+    /// 把 NetworkManager 深拷贝的协议 DTO 转成 Combat.Core 的不可变快照。
+    /// 所有 Fix64 字段恢复时直接写回 RawValue，不做十进制或浮点往返。
+    /// </summary>
+    private bool OnReconnectStateReceived(
+        LockstepReconnectStateData state)
+    {
+        if (state == null || Lockstep == null)
+        {
+            return false;
+        }
+
+        const string expectedRuleset = "combat-core-v1";
+        if (!string.Equals(
+                state.RulesetVersion,
+                expectedRuleset,
+                StringComparison.Ordinal))
+        {
+            Debug.LogError(
+                $"[Reconnect] Ruleset mismatch: server=" +
+                $"{state.RulesetVersion}, client={expectedRuleset}.");
+            return false;
+        }
+
+        if (state.Players == null ||
+            state.Players.Length != Lockstep.PlayerIds.Count)
+        {
+            Debug.LogError(
+                $"[Reconnect] Player snapshot count mismatch: " +
+                $"snapshot={state.Players?.Length ?? 0}, " +
+                $"client={Lockstep.PlayerIds.Count}.");
+            return false;
+        }
+
+        PlayerEntity.Snapshot[] entities =
+            new PlayerEntity.Snapshot[state.Players.Length];
+
+        for (int i = 0; i < state.Players.Length; i++)
+        {
+            ReconnectPlayerSnapshotData source = state.Players[i];
+            entities[i] = new PlayerEntity.Snapshot(
+                new PlayerEntity.SnapshotData
+                {
+                    EntityId = source.EntityId,
+                    PreferredTargetId = source.PreferredTargetId,
+                    LogicalPosition = new LogicVector3(
+                        Fix64.FromRaw(source.PositionXRaw),
+                        Fix64.FromRaw(source.PositionYRaw),
+                        Fix64.FromRaw(source.PositionZRaw)),
+                    PreviousLogicalPosition = new LogicVector3(
+                        Fix64.FromRaw(source.PreviousPositionXRaw),
+                        Fix64.FromRaw(source.PreviousPositionYRaw),
+                        Fix64.FromRaw(source.PreviousPositionZRaw)),
+                    LogicalRotation = new LogicRotation(
+                        Fix64.FromRaw(source.RotationYawRaw)),
+                    PreviousLogicalRotation = new LogicRotation(
+                        Fix64.FromRaw(source.PreviousRotationYawRaw)),
+                    CurrentHP = Fix64.FromRaw(source.CurrentHpRaw),
+                    AttackState = (AttackState)source.AttackState,
+                    AttackPhase = (AttackPhase)source.AttackPhase,
+                    AttackFrame = source.AttackFrame,
+                    KnockbackVelocity = new LogicVector3(
+                        Fix64.FromRaw(source.KnockbackVelocityXRaw),
+                        Fix64.FromRaw(source.KnockbackVelocityYRaw),
+                        Fix64.FromRaw(source.KnockbackVelocityZRaw)),
+                    IsDead = source.IsDead,
+                    IsHurt = source.IsHurt,
+                    IsMoving = source.IsMoving,
+                    BufferedAttack =
+                        (AttackState)source.BufferedAttack,
+                    UltimateInputBuffered =
+                        source.UltimateInputBuffered,
+                    ComboHitCount = source.ComboHitCount,
+                    ComboCounterWindowRemaining =
+                        source.ComboCounterWindowRemaining,
+                    HurtTimer = Fix64.FromRaw(source.HurtTimerRaw),
+                    UltimateStartPosition = new LogicVector3(
+                        Fix64.FromRaw(source.UltimateStartXRaw),
+                        Fix64.FromRaw(source.UltimateStartYRaw),
+                        Fix64.FromRaw(source.UltimateStartZRaw)),
+                    UltimateFurthestPosition = new LogicVector3(
+                        Fix64.FromRaw(source.UltimateFurthestXRaw),
+                        Fix64.FromRaw(source.UltimateFurthestYRaw),
+                        Fix64.FromRaw(source.UltimateFurthestZRaw)),
+                    UltimateFurthestDistanceSqr = Fix64.FromRaw(
+                        source.UltimateFurthestDistanceSqrRaw),
+                    CurrentFrame = source.CurrentFrame,
+                    HitTargetsThisAttack =
+                        source.HitTargetsThisAttack == null
+                            ? Array.Empty<int>()
+                            : (int[])source.HitTargetsThisAttack.Clone()
+                });
+        }
+
+        CombatWorld.Snapshot snapshot = new CombatWorld.Snapshot(
+            state.ConfirmedFrame,
+            entities);
+
+        FrameInput[] lastInputs = new FrameInput[
+            state.LastInputs?.Length ?? 0];
+        for (int i = 0; i < lastInputs.Length; i++)
+        {
+            ReconnectInputData input = state.LastInputs[i];
+            lastInputs[i] = new FrameInput(
+                state.NextFrame,
+                input.PlayerId,
+                (FrameInputMask)(uint)input.InputMask,
+                input.TargetEntityId);
+        }
+
+        try
+        {
+            Lockstep.ApplyReconnectState(
+                snapshot,
+                state.ConfirmedFrame,
+                state.NextFrame,
+                lastInputs,
+                state.WorldHash);
+
+            ulong restoredHash =
+                Lockstep.World.CalculateWorldHash();
+            if (restoredHash != state.WorldHash)
+            {
+                Debug.LogError(
+                    $"[Reconnect] Restored hash mismatch at " +
+                    $"Frame={state.ConfirmedFrame}: " +
+                    $"client={restoredHash}, server={state.WorldHash}.");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError(
+                $"[Reconnect] Failed to restore authoritative state: " +
+                $"{exception}");
+            return false;
+        }
     }
 
     /// <summary>

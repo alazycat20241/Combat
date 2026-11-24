@@ -753,7 +753,7 @@
   },
   "projectFileDependencyGroups": {
     "net9.0": [
-      "Fantasy-Net >= *"
+      "Fantasy-Net >= 2026.1.2003"
     ]
   },
   "packageFolders": {
@@ -809,7 +809,7 @@
         "dependencies": {
           "Fantasy-Net": {
             "target": "Package",
-            "version": "[*, )"
+            "version": "[2026.1.2003, )"
           }
         },
         "imports": [

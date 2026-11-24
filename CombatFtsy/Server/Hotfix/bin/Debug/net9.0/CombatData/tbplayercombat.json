@@ -1,0 +1,32 @@
+[
+  {
+    "Id": 1001,
+    "Name": "Player",
+    "MaxHP": 100,
+    "MoveSpeed": 4,
+    "MoveInputDeadZone": 0.1,
+    "RotationSharpness": 10,
+    "MapMinX": -10,
+    "MapMaxX": 10,
+    "MapMinZ": -10,
+    "MapMaxZ": 10,
+    "HitStunDuration": 0.4,
+    "KnockbackFriction": 28,
+    "HurtBoxSize": {
+      "x": 0.8,
+      "y": 1.8,
+      "z": 0.8
+    },
+    "HurtBoxLocalOffset": {
+      "x": 0,
+      "y": 0.9,
+      "z": 0
+    },
+    "RequiredComboHits": 3,
+    "ComboCounterWindowFrames": 30,
+    "UltimateKnockbackDistanceScale": 1,
+    "UltimateHitNormalizedFallback": 0.9,
+    "UltimateHitWindowFrames": 1,
+    "AllowSelfHitWhenNoTarget": true
+  }
+]

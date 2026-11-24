@@ -273,11 +273,21 @@
           "lib/net7.0/ZstdSharp.dll": {}
         }
       },
+      "Combat.Core.Server/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v9.0",
+        "compile": {
+          "bin/placeholder/Combat.Core.Server.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Combat.Core.Server.dll": {}
+        }
+      },
       "Entity/1.0.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v9.0",
         "dependencies": {
-          "Fantasy-Net": "0.0.0"
+          "Fantasy-Net": "2026.1.2003"
         },
         "compile": {
           "bin/placeholder/Entity.dll": {}
@@ -762,6 +772,11 @@
         "zstdsharp.port.nuspec"
       ]
     },
+    "Combat.Core.Server/1.0.0": {
+      "type": "project",
+      "path": "../CombatCore/CombatCore.csproj",
+      "msbuildProject": "../CombatCore/CombatCore.csproj"
+    },
     "Entity/1.0.0": {
       "type": "project",
       "path": "../Entity/Entity.csproj",
@@ -770,6 +785,7 @@
   },
   "projectFileDependencyGroups": {
     "net9.0": [
+      "Combat.Core.Server >= 1.0.0",
       "Entity >= 1.0.0"
     ]
   },
@@ -806,6 +822,9 @@
         "net9.0": {
           "targetAlias": "net9.0",
           "projectReferences": {
+            "D:\\unityzuoye\\Combat\\CombatFtsy\\Server\\CombatCore\\CombatCore.csproj": {
+              "projectPath": "D:\\unityzuoye\\Combat\\CombatFtsy\\Server\\CombatCore\\CombatCore.csproj"
+            },
             "D:\\unityzuoye\\Combat\\CombatFtsy\\Server\\Entity\\Entity.csproj": {
               "projectPath": "D:\\unityzuoye\\Combat\\CombatFtsy\\Server\\Entity\\Entity.csproj"
             }

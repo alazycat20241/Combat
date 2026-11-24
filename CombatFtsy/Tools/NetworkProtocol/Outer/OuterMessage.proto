@@ -18,12 +18,106 @@ message G2C_TestResponse // IResponse
 // 服务端通过 Session 绑定玩家身份，并按加入顺序分配唯一 PlayerId。
 message C2G_JoinLockstep // IMessage
 {
+	string roomId = 1;
+	string matchToken = 2;
+}
+
+// 注册或恢复玩家资料。displayName 是展示昵称，
+// clientProfileToken 是客户端本地保存的恢复凭据；首次注册时为空。
+message C2G_RegisterProfile // IMessage
+{
+	string displayName = 1;
+	string clientProfileToken = 2;
+}
+
+message G2C_ProfileRegistered // IMessage
+{
+	bool success = 1;
+	string message = 2;
+	int64 profileId = 3;
+	string displayName = 4;
+	string profileToken = 5;
+}
+
+// 进入 1v1 匹配队列。
+message C2G_StartMatchmaking // IMessage
+{
+}
+
+message C2G_CancelMatchmaking // IMessage
+{
+}
+
+// state: 0=Idle, 1=Queued, 2=Matched, 3=Cancelled, 4=Error
+message G2C_MatchmakingStatus // IMessage
+{
+	int32 state = 1;
+	int32 queueSize = 2;
+	string message = 3;
+}
+
+// 匹配成功。matchToken 只用于进入对应锁步房间；
+// 进入房间后服务端会另外下发 reconnectToken。
+message G2C_MatchFound // IMessage
+{
+	string roomId = 1;
+	int32 playerId = 2;
+	int64 profileId = 3;
+	string matchToken = 4;
+	string localDisplayName = 5;
+	string opponentDisplayName = 6;
+}
+
+// 客户端完成战斗场景加载后发送准备。双方都准备好才发送 BattleStart。
+message C2G_MatchReady // IMessage
+{
+	string roomId = 1;
+	string matchToken = 2;
+}
+
+message G2C_BattleStart // IMessage
+{
+	string roomId = 1;
+	int32 playerId = 2;
+	string rulesetVersion = 3;
+}
+
+// 服务端权威战斗世界判定的最终结果。
+message G2C_MatchSettled // IMessage
+{
+	string roomId = 1;
+	bool isDraw = 2;
+	int32 winnerPlayerId = 3;
+	int32 loserPlayerId = 4;
+	string winnerName = 5;
+	string loserName = 6;
+	int32 finalFrame = 7;
+	uint64 worldHash = 8;
+	string reason = 9;
+}
+
+message C2G_LeaveMatch // IMessage
+{
+	string roomId = 1;
+	string matchToken = 2;
 }
 
 // 服务端向客户端下发其唯一的锁步 PlayerId。
 message G2C_PlayerAssigned // IMessage
 {
 	int32 playerId = 1;
+	string roomId = 2;
+	string reconnectToken = 3;
+}
+
+// 已断线客户端用旧身份请求重新绑定到一个新的 Session。
+// reconnectToken 是服务端首次分配席位时下发的随机凭据；服务端只保存其哈希。
+message C2G_ReconnectLockstep // IMessage
+{
+	string roomId = 1;
+	int32 playerId = 2;
+	string reconnectToken = 3;
+	int32 lastReceivedFrame = 4;
 }
 
 // 客户端向 Gate 提交某一逻辑帧的输入。
@@ -54,4 +148,65 @@ message G2C_FrameData // IMessage
 {
 	int32 frameId = 1;
 	repeated PlayerInputData inputs = 2;
+}
+
+// 单个玩家的完整可回滚逻辑快照。
+// 所有 Fix64 都使用 RawValue，禁止转换为 float/double，避免重连本身引入精度误差。
+message ReconnectPlayerState
+{
+	int32 entityId = 1;
+	int32 preferredTargetId = 2;
+	int64 positionXRaw = 3;
+	int64 positionYRaw = 4;
+	int64 positionZRaw = 5;
+	int64 previousPositionXRaw = 6;
+	int64 previousPositionYRaw = 7;
+	int64 previousPositionZRaw = 8;
+	int64 rotationYawRaw = 9;
+	int64 previousRotationYawRaw = 10;
+	int64 currentHpRaw = 11;
+	int32 attackState = 12;
+	int32 attackPhase = 13;
+	int32 attackFrame = 14;
+	int64 knockbackVelocityXRaw = 15;
+	int64 knockbackVelocityYRaw = 16;
+	int64 knockbackVelocityZRaw = 17;
+	bool isDead = 18;
+	bool isHurt = 19;
+	bool isMoving = 20;
+	int32 bufferedAttack = 21;
+	bool ultimateInputBuffered = 22;
+	int32 comboHitCount = 23;
+	int32 comboCounterWindowRemaining = 24;
+	int64 hurtTimerRaw = 25;
+	int64 ultimateStartXRaw = 26;
+	int64 ultimateStartYRaw = 27;
+	int64 ultimateStartZRaw = 28;
+	int64 ultimateFurthestXRaw = 29;
+	int64 ultimateFurthestYRaw = 30;
+	int64 ultimateFurthestZRaw = 31;
+	int64 ultimateFurthestDistanceSqrRaw = 32;
+	int64 currentFrame = 33;
+	repeated int32 hitTargetsThisAttack = 34;
+}
+
+// 服务端权威 CombatWorld 在 confirmedFrame 后的完整恢复状态。
+// lastInputs 用于客户端恢复远端输入延续，避免恢复后第一帧错误预测。
+message G2C_ReconnectState // IMessage
+{
+	string roomId = 1;
+	int32 confirmedFrame = 2;
+	int32 nextFrame = 3;
+	uint64 worldHash = 4;
+	string rulesetVersion = 5;
+	repeated ReconnectPlayerState players = 6;
+	repeated PlayerInputData lastInputs = 7;
+}
+
+// 离线保护超时后服务端关闭旧对局。
+// 客户端收到后必须丢弃 PlayerId/Token，不能继续尝试恢复这个房间。
+message G2C_LockstepClosed // IMessage
+{
+	int32 reason = 1;
+	string message = 2;
 }

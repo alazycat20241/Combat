@@ -1,0 +1,15 @@
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Combat.Core.Server.deps.json
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Combat.Core.Server.dll
+D:\unityzuoye\Combat\Deep\.codex_tmp\ReconnectProtocol\BuildOut\Combat.Core.Server.pdb
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\CombatCore.GeneratedMSBuildEditorConfig.editorconfig
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\CombatCore.AssemblyInfoInputs.cache
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\CombatCore.AssemblyInfo.cs
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\CombatCore.csproj.CoreCompileInputs.cache
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\CombatCore.sourcelink.json
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\Combat.Core.Server.dll
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\refint\Combat.Core.Server.dll
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\Combat.Core.Server.pdb
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\obj\Debug\net9.0\ref\Combat.Core.Server.dll
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\bin\Debug\net9.0\Combat.Core.Server.deps.json
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\bin\Debug\net9.0\Combat.Core.Server.dll
+D:\unityzuoye\Combat\CombatFtsy\Server\CombatCore\bin\Debug\net9.0\Combat.Core.Server.pdb

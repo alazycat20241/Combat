@@ -136,6 +136,12 @@ namespace Combat.Core
         /// </summary>
         public event Action<long> RollbackCompleted;
 
+        /// <summary>
+        /// 服务端权威重连快照恢复完成。表现层只能在此时做一次 Snap，
+        /// 不能把恢复过程拆成多个历史帧交给 Animator 播放。
+        /// </summary>
+        public event Action<long> ReconnectStateApplied;
+
         public ulong CurrentWorldHash { get; private set; }
         public long CurrentFrame => world.NextFrame;
 
@@ -257,6 +263,52 @@ namespace Combat.Core
             }
         }
 
+        /// <summary>
+        /// 清理上一局并回到 Frame=0。
+        /// 新对局必须先调用本方法，再等待服务端重新分配本局 PlayerId。
+        /// </summary>
+        public void ResetForNewMatch()
+        {
+            for (int i = 0; i < playerIds.Count; i++)
+            {
+                int playerId = playerIds[i];
+                PlayerEntity? entity = world.FindEntity(playerId);
+                if (entity != null)
+                {
+                    CombatSpawnRules.TryGetSpawn(
+                        playerId,
+                        out LogicVector3 position,
+                        out LogicRotation rotation);
+                    entity.ResetForTesting(position, rotation);
+                }
+
+                pendingInputMasks[playerId] = FrameInputMask.None;
+                preferredTargets[playerId] = 0;
+                lastKnownInputs[playerId] = default;
+            }
+
+            lock (incomingFrameLock)
+            {
+                incomingFrames.Clear();
+            }
+
+            for (int i = 0; i < predictionBuffer.Length; i++)
+            {
+                predictionBuffer[i] = null;
+            }
+
+            committedEvents.Clear();
+            discardedReplayEvents.Clear();
+            emittedCombatEvents.Clear();
+            world.ResetFrame();
+
+            nextInputFrameToSend = 1;
+            lastConfirmedFrame = 0;
+            predictionStarted = false;
+            hasServerAssignedPlayerId = false;
+            CurrentWorldHash = 0;
+        }
+
         public void SubmitLocalInput(
             int playerId,
             FrameInputMask inputMask)
@@ -316,6 +368,99 @@ namespace Combat.Core
                     incomingFrames.Add(frameData.Frame, frameData);
                 }
             }
+        }
+
+        /// <summary>
+        /// 用服务端权威快照重建本地逻辑时间线。
+        ///
+        /// 成功返回后：
+        /// 1. CombatWorld.Frame 等于服务端 confirmedFrame；
+        /// 2. 所有旧预测、旧确认队列、旧事件哈希全部丢弃；
+        /// 3. 下一帧从服务端给出的 nextFrame 继续预测。
+        ///
+        /// 本方法只改逻辑层，不直接写 Unity Transform 或 Animator。
+        /// </summary>
+        public void ApplyReconnectState(
+            CombatWorld.Snapshot authoritativeSnapshot,
+            int confirmedFrame,
+            int nextFrame,
+            IReadOnlyList<FrameInput> lastInputs,
+            ulong authoritativeWorldHash)
+        {
+            if (authoritativeSnapshot == null)
+            {
+                throw new ArgumentNullException(
+                    nameof(authoritativeSnapshot));
+            }
+
+            if (confirmedFrame < 0 || nextFrame != confirmedFrame + 1)
+            {
+                throw new ArgumentException(
+                    $"Invalid reconnect frames: confirmed={confirmedFrame}, " +
+                    $"next={nextFrame}.");
+            }
+
+            if (authoritativeSnapshot.Frame != confirmedFrame)
+            {
+                throw new InvalidOperationException(
+                    $"Reconnect snapshot frame {authoritativeSnapshot.Frame} " +
+                    $"does not match confirmed frame {confirmedFrame}.");
+            }
+
+            world.RestoreSnapshot(authoritativeSnapshot);
+            if (world.Frame != confirmedFrame ||
+                world.NextFrame != nextFrame)
+            {
+                throw new InvalidOperationException(
+                    "CombatWorld frame did not match the reconnect state.");
+            }
+
+            lock (incomingFrameLock)
+            {
+                incomingFrames.Clear();
+            }
+
+            for (int i = 0; i < predictionBuffer.Length; i++)
+            {
+                predictionBuffer[i] = null;
+            }
+
+            committedEvents.Clear();
+            discardedReplayEvents.Clear();
+            emittedCombatEvents.Clear();
+            lastKnownInputs.Clear();
+
+            for (int i = 0; i < playerIds.Count; i++)
+            {
+                int playerId = playerIds[i];
+                pendingInputMasks[playerId] = FrameInputMask.None;
+                preferredTargets[playerId] = 0;
+                lastKnownInputs[playerId] = default;
+            }
+
+            if (lastInputs != null)
+            {
+                for (int i = 0; i < lastInputs.Count; i++)
+                {
+                    FrameInput input = lastInputs[i];
+                    if (!lastKnownInputs.ContainsKey(input.PlayerId))
+                    {
+                        continue;
+                    }
+
+                    lastKnownInputs[input.PlayerId] =
+                        ToCombatInput(input);
+                    preferredTargets[input.PlayerId] =
+                        input.TargetEntityId;
+                }
+            }
+
+            lastConfirmedFrame = confirmedFrame;
+            nextInputFrameToSend = nextFrame;
+            predictionStarted = true;
+            CurrentWorldHash = authoritativeWorldHash;
+
+            ReconnectStateApplied?.Invoke(world.Frame);
         }
 
         /// <summary>
