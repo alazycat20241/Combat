@@ -26,7 +26,7 @@ namespace Combat.Core
             FrameInputMask.Jump;
 
         private const int DefaultPredictionBufferFrames = 128;
-        private const int MaxPredictionAheadFrames = 8;
+        private const int MaxPredictionAheadFrames = 3;
 
         private sealed class PredictionFrame
         {

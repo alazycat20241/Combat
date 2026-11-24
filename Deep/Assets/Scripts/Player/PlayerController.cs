@@ -53,8 +53,7 @@ public sealed class PlayerController : MonoBehaviour
     [SerializeField, Min(0.1f)] private float maxActionVisualDuration = 3f;
 
     [Header("回滚视觉包容")]
-    [SerializeField, Min(0f)] private float rollbackFastCorrectionDistance = 0.2f;
-    [SerializeField, Min(0f)] private float rollbackSnapDistance = 0.5f;
+    [SerializeField, Min(0f)] private float strongRollbackFlashDistance = 0.5f;
     [SerializeField, Min(0.01f)] private float rollbackCorrectionDuration = 0.1f;
     [SerializeField] private bool enableStrongRollbackFlash = true;
 
@@ -77,13 +76,10 @@ public sealed class PlayerController : MonoBehaviour
     private Quaternion renderStartRotation;
     private float moveIntentTimer;
     private float smoothedMoveAmount;
-    private bool correctionActive;
-    private float correctionElapsed;
-    private Vector3 correctionStartPosition;
-    private Vector3 correctionTargetPosition;
-    private Quaternion correctionStartRotation;
-    private Quaternion correctionTargetRotation;
     private bool pendingRollbackVisualCorrection;
+    private bool visualErrorCorrectionActive;
+    private Vector3 visualPositionError;
+    private Quaternion visualRotationError = Quaternion.identity;
     private AttackState observedAttackState;
     private bool observedHurtState;
     private bool observedDeathState;
@@ -487,8 +483,7 @@ public sealed class PlayerController : MonoBehaviour
             IsVisualActionPlaying();
 
         if ((hadActionState || activeActionStateName != null) &&
-            !visualActionPlaying &&
-            !correctionActive)
+            !visualActionPlaying)
         {
             ReturnToLocomotionAfterRollback();
         }
@@ -615,12 +610,6 @@ public sealed class PlayerController : MonoBehaviour
             ApplyRollbackVisualCorrection();
         }
 
-        if (correctionActive)
-        {
-            UpdateFastRollbackCorrection();
-            return;
-        }
-
         if (entity.CurrentFrame != renderFrame)
         {
             renderFrame = entity.CurrentFrame;
@@ -636,14 +625,48 @@ public sealed class PlayerController : MonoBehaviour
             renderAlpha +
             Time.deltaTime / logicFrameDuration);
 
-        transform.position = Vector3.Lerp(
+        Vector3 desiredPosition = Vector3.Lerp(
             renderStartPosition,
             ToUnityVector(entity.LogicalPosition),
             renderAlpha);
-        transform.rotation = Quaternion.Slerp(
+        Quaternion desiredRotation = Quaternion.Slerp(
             renderStartRotation,
             ToUnityRotation(entity.LogicalRotation),
             renderAlpha);
+
+        if (visualErrorCorrectionActive)
+        {
+            float decay = Mathf.Clamp01(
+                Time.deltaTime /
+                Mathf.Max(rollbackCorrectionDuration, 0.01f));
+
+            visualPositionError = Vector3.Lerp(
+                visualPositionError,
+                Vector3.zero,
+                decay);
+            visualRotationError = Quaternion.Slerp(
+                visualRotationError,
+                Quaternion.identity,
+                decay);
+
+            desiredPosition += visualPositionError;
+            desiredRotation =
+                desiredRotation * visualRotationError;
+
+            if (visualPositionError.sqrMagnitude < 0.000001f &&
+                Quaternion.Angle(
+                    visualRotationError,
+                    Quaternion.identity) < 0.05f)
+            {
+                visualErrorCorrectionActive = false;
+                visualPositionError = Vector3.zero;
+                visualRotationError = Quaternion.identity;
+            }
+        }
+
+        transform.SetPositionAndRotation(
+            desiredPosition,
+            desiredRotation);
     }
 
     private float ResolveLogicFrameDuration()
@@ -653,35 +676,6 @@ public sealed class PlayerController : MonoBehaviour
             ? world.FixedDeltaTime.ToFloat()
             : 0.05f;
         return Mathf.Max(duration, 0.0001f);
-    }
-
-    private void UpdateFastRollbackCorrection()
-    {
-        // 目标仍读取最新逻辑状态，避免校正过程中又产生新的确认帧。
-        correctionTargetPosition =
-            ToUnityVector(entity.LogicalPosition);
-        correctionTargetRotation =
-            ToUnityRotation(entity.LogicalRotation);
-
-        correctionElapsed += Time.deltaTime;
-        float t = Mathf.Clamp01(
-            correctionElapsed /
-            Mathf.Max(rollbackCorrectionDuration, 0.01f));
-
-        transform.position = Vector3.Lerp(
-            correctionStartPosition,
-            correctionTargetPosition,
-            t);
-        transform.rotation = Quaternion.Slerp(
-            correctionStartRotation,
-            correctionTargetRotation,
-            t);
-
-        if (t >= 1f)
-        {
-            correctionActive = false;
-            ResetRenderInterpolationToCurrent();
-        }
     }
 
     [ContextMenu("调试：恢复满血并重置战斗状态")]
@@ -725,27 +719,25 @@ public sealed class PlayerController : MonoBehaviour
             transform.position,
             logicalPosition);
 
-        if (deviation < rollbackFastCorrectionDistance)
+        if (deviation < 0.02f)
         {
-            // 微小误差不直接 Snap。让正常的逻辑帧插值继续吸收，
-            // 或在下一次逻辑状态变化时自然追平。
             return;
         }
 
-        if (deviation <= rollbackSnapDistance)
-        {
-            correctionActive = true;
-            correctionElapsed = 0f;
-            correctionStartPosition = transform.position;
-            correctionStartRotation = transform.rotation;
-            correctionTargetPosition = logicalPosition;
-            correctionTargetRotation = logicalRotation;
-            return;
-        }
+        // 保留当前看到的模型位置与新逻辑位置之间的误差，
+        // 后续渲染帧通过 offset 连续衰减追平，而不是直接 Snap。
+        visualPositionError =
+            transform.position - logicalPosition;
+        visualRotationError =
+            transform.rotation *
+            Quaternion.Inverse(logicalRotation);
+        visualErrorCorrectionActive = true;
 
-        SnapVisualToLogic();
+        ResetRenderInterpolationToCurrent();
 
-        if (enableStrongRollbackFlash && acceptPlayerInput)
+        if (deviation > strongRollbackFlashDistance &&
+            enableStrongRollbackFlash &&
+            acceptPlayerInput)
         {
             RollbackScreenFlash.Trigger();
         }
@@ -802,7 +794,9 @@ public sealed class PlayerController : MonoBehaviour
         }
 
         ultimateVisualSyncEndFrame = -1;
-        correctionActive = false;
+        visualErrorCorrectionActive = false;
+        visualPositionError = Vector3.zero;
+        visualRotationError = Quaternion.identity;
         pendingRollbackVisualCorrection = false;
         ResetRenderInterpolationToCurrent();
         transform.SetPositionAndRotation(
@@ -907,11 +901,8 @@ public sealed class PlayerController : MonoBehaviour
         moveAnimationDelay = Mathf.Max(0f, moveAnimationDelay);
         moveAnimationBlendTime =
             Mathf.Max(0.01f, moveAnimationBlendTime);
-        rollbackFastCorrectionDistance =
-            Mathf.Max(0f, rollbackFastCorrectionDistance);
-        rollbackSnapDistance = Mathf.Max(
-            rollbackFastCorrectionDistance,
-            rollbackSnapDistance);
+        strongRollbackFlashDistance =
+            Mathf.Max(0f, strongRollbackFlashDistance);
         rollbackCorrectionDuration =
             Mathf.Max(0.01f, rollbackCorrectionDuration);
         actionCrossFadeTime =
